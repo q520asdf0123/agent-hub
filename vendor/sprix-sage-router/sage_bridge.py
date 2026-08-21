@@ -93,6 +93,15 @@ def main():
         top_req = requirements[0].name if requirements else None
         primary = dict(d.assignments).get(top_req) or (d.agents[0] if d.agents else incumbent)
     partner = next((a for a in d.agents if a != primary), None)
+    # 搭档补充规则：算法未组队时，若某个次要需求（权重≥0.25）明显是另一方强项，
+    # 指定其为复查搭档（触发前端的自动协作复查）。
+    if partner is None:
+        other = "codex" if primary == "claude" else "claude"
+        po, pp = profiles[other], profiles[primary]
+        for cat, w in weights.items():
+            if w >= 0.25 and po.get(cat, 0) >= pp.get(cat, 0) + 0.03:
+                partner = other
+                break
 
     print(json.dumps({
         "mode": mode,
