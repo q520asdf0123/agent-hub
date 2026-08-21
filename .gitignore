@@ -1,0 +1,4 @@
+/target
+/docs/samples/
+*.log
+__pycache__/

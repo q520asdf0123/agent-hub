@@ -1,0 +1,18 @@
+[package]
+name = "agent-hub"
+version = "0.1.0"
+edition = "2021"
+description = "本地 CLI Agent（Claude Code / Codex）的 Web 界面"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+async-stream = "0.3"
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+
+[profile.release]
+strip = true
