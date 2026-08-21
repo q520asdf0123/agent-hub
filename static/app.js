@@ -1,6 +1,133 @@
 'use strict';
 
 /* ==========================================================================
+ * i18n：中文为源语言（键即中文），英文经 I18N_EN 映射；t() 全局可用。
+ * ========================================================================== */
+
+let CUR_LANG = 'zh';
+
+const I18N_EN = {
+  '搜索会话': 'Search sessions', '新建会话': 'New session', '项目': 'Projects', '对话': 'Chats',
+  '搜索结果': 'Results', '技能': 'Skills', '图片': 'Image', '本地': 'Local', '收起': 'Collapse',
+  '收起文件 ⌃': 'Collapse files ⌃', '已处理': 'Processed in', '(无标题)': '(untitled)',
+  '暂无对话': 'No chats yet', '没有匹配的会话': 'No matching sessions', '搜索失败：': 'Search failed: ',
+  '会话加载失败': 'Failed to load sessions', '项目加载失败': 'Failed to load projects',
+  '还未导入项目，点「＋」从历史中选择': 'No projects imported — click "+" to pick from history',
+  '检测 CLI 中…': 'Detecting CLIs…', '已安装': 'installed', '未安装': 'not installed',
+  'CLI 状态获取失败': 'Failed to get CLI status', '切换 Agent': 'Switch agent',
+  '默认模型': 'Default model', '默认': 'Default', '绕过权限': 'Bypass permissions',
+  '接受编辑': 'Accept edits', '计划': 'Plan', '工作区可写': 'Workspace write', '只读': 'Read-only',
+  '低': 'Low', '中': 'Medium', '高': 'High', '超高': 'X-High', '最大': 'Max', '最小': 'Minimal',
+  '全局默认': 'global default', '加载技能中…': 'Loading skills…',
+  '筛选技能 / 命令…': 'Filter skills / commands…', '没有匹配的技能': 'No matching skills',
+  '未发现技能': 'No skills found',
+  '未发现 Codex 自定义 prompt（~/.codex/prompts/*.md）': 'No Codex custom prompts (~/.codex/prompts/*.md)',
+  '技能加载失败：': 'Failed to load skills: ',
+  '搜索历史项目（名称 / 路径）…': 'Search historical projects…', '扫描历史项目中…': 'Scanning history…',
+  '没有匹配的项目': 'No matching projects', '历史中没有发现项目': 'No projects found in history',
+  '扫描失败：': 'Scan failed: ', '⌨ 手动输入路径…': '⌨ Enter a path manually…',
+  '导入': 'Import', '移除': 'Remove', '会话': 'sessions', '操作失败：': 'Operation failed: ',
+  '添加项目失败：': 'Failed to add project: ',
+  '输入项目目录的完整路径': 'Enter the full project directory path', '输入模型名': 'Enter model name',
+  '输入你的任务…': 'Describe your task…', '继续这个会话…': 'Continue this session…',
+  '请先选择项目目录（输入卡片下方的项目选择器）': 'Pick a project directory first (selector below the composer)',
+  '图片上传失败：': 'Image upload failed: ', '请求失败：': 'Request failed: ',
+  '运行失败（无错误信息）': 'Run failed (no error message)', '■ 已停止': '■ Stopped',
+  '↪ 已断开查看，任务在后台继续': '↪ Viewer detached — task continues in background',
+  '页面重连 · 以下为实时输出': 'Reconnected · live output below', '加载差异中…': 'Loading diff…',
+  '没有可显示的差异（可能已提交，或与 HEAD 一致）': 'No diff to show (maybe committed, or identical to HEAD)',
+  '差异加载失败：': 'Failed to load diff: ', '✕ 关闭': '✕ Close',
+  '在 VS Code 中打开': 'Open in VS Code', '在资源管理器中打开': 'Reveal in File Explorer',
+  '复制路径': 'Copy path', '复制文件内容': 'Copy file content', '复制失败：': 'Copy failed: ',
+  '打开失败：': 'Open failed: ', '⧉ 复制': '⧉ Copy', '✓ 已复制': '✓ Copied', '▶ 预览': '▶ Preview',
+  '✕ 收起预览': '✕ Hide preview', '⧉ 新标签打开': '⧉ Open in new tab', '💭 思考过程': '💭 Thinking',
+  '📋 任务计划': '📋 Plan', '运行中': 'Running', '已完成': 'Done', '运行出错：': 'Failed: ',
+  '未知错误': 'unknown error', '转录加载失败：': 'Failed to load transcript: ', '重试': 'Retry',
+  '（此会话没有可显示的消息）': '(no displayable messages in this session)',
+  '编辑了文件': 'Edited files', '读取了文件': 'Read files', '运行了命令': 'Ran commands',
+  '执行了操作': 'Performed actions', '⚡ 快速': '⚡ Fast', '⚡ 快速·开': '⚡ Fast · on',
+  '🧭 智能路由': '🧭 Smart routing', '🧭 智能路由·开': '🧭 Routing · on', '🧭 路由中…': '🧭 Routing…',
+  '🧭 SAGE 路由': '🧭 SAGE routing', '继续当前': 'Stay', '移交': 'Handoff', '协作': 'Collaborate',
+  '需求推断：': 'Inferred needs: ', '协作建议：完成后可用 ': 'Suggestion: review afterwards with ',
+  ' 复查': '', '成功率 ': 'Success ', ' · 覆盖 ': ' · Coverage ', ' · 效用 ': ' · Utility ',
+  '点击查看差异 · 右键更多操作': 'Click for diff · right-click for more', '点击放大': 'Click to zoom',
+  '刚刚': 'just now', '跟随浏览器': 'Follow browser', '选择项目…': 'Pick a project…',
+  '移除图片': 'Remove image', '＋ 导入项目…': '+ Import project…',
+  'Enter 发送 · Shift+Enter 换行': 'Enter to send · Shift+Enter for newline',
+};
+
+function t(s) {
+  if (CUR_LANG !== 'en') return s;
+  const v = I18N_EN[s];
+  return v !== undefined ? v : s;
+}
+
+function browserLang() {
+  return (navigator.language || '').toLowerCase().startsWith('zh') ? 'zh' : 'en';
+}
+
+function tShowAll(n) {
+  return CUR_LANG === 'en' ? 'Show all ' + n : '显示全部 ' + n + ' 条';
+}
+function tMoreFiles(n) {
+  return CUR_LANG === 'en' ? 'Show ' + n + ' more files ⌄' : '再显示 ' + n + ' 个文件 ⌄';
+}
+function tEditedFiles(n) {
+  return CUR_LANG === 'en'
+    ? 'Edited ' + n + ' file' + (n > 1 ? 's' : '')
+    : '已编辑 ' + n + ' 个文件';
+}
+function tBound(label) {
+  return CUR_LANG === 'en'
+    ? 'Bound to ' + label + ' — start a new session to switch'
+    : '会话已绑定 ' + label + '，新建会话可切换';
+}
+
+/** 静态界面文案随语言刷新 */
+function applyLang() {
+  document.documentElement.setAttribute('lang', CUR_LANG === 'en' ? 'en' : 'zh-CN');
+  const S = (sel, txt) => {
+    const n = document.querySelector(sel);
+    if (n) n.textContent = txt;
+  };
+  const si = document.querySelector('#search-input');
+  if (si) si.placeholder = t('搜索会话');
+  S('#btn-new-session', '＋ ' + t('新建会话'));
+  S('#btn-new-session-2', t('新建会话'));
+  const gp = document.querySelectorAll('#head-projects span');
+  if (gp[1]) gp[1].textContent = t('项目');
+  const gc = document.querySelectorAll('#head-convs span');
+  if (gc[1]) gc[1].textContent = t('对话');
+  S('#search-section .group-head span', t('搜索结果'));
+  S('#hero-pre', CUR_LANG === 'en' ? 'What can ' : '需要 ');
+  S('#hero-post', CUR_LANG === 'en' ? ' do for you?' : ' 帮你做些什么？');
+  S('#skill-btn', '／' + t('技能'));
+  S('#attach-btn', '📎 ' + t('图片'));
+  const loc = document.querySelector('.chip-static');
+  if (loc) loc.textContent = '🖥 ' + t('本地');
+  S('.hero-tips', t('Enter 发送 · Shift+Enter 换行'));
+  const pi = document.querySelector('#prompt-input');
+  if (pi) pi.placeholder = state.session ? t('继续这个会话…') : t('输入你的任务…');
+  const pb = document.querySelector('#project-btn');
+  if (pb && !state.project) pb.textContent = t('选择项目…');
+}
+
+function setLang(v) {
+  if (v === 'auto') {
+    localStorage.removeItem('ah-lang');
+    CUR_LANG = browserLang();
+  } else {
+    localStorage.setItem('ah-lang', v);
+    CUR_LANG = v;
+  }
+  applyLang();
+  syncAgentUI();
+  renderProjects();
+  loadConvs();
+  loadStatus();
+}
+
+/* ==========================================================================
  * Agent Hub 前端 — 纯原生 JS
  * 结构：工具函数 → agent 配置 → 全局 state → api 封装 → 下拉菜单 →
  *       侧栏渲染 → Hero/输入卡片 → 转录渲染 → NDJSON 流式对话 → 初始化
@@ -29,14 +156,15 @@ function debounce(fn, ms) {
 /** 相对时间：刚刚 / N 分钟前 / N 小时前 / N 天前 / 日期 */
 function relTime(iso) {
   if (!iso) return '';
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return '';
-  const diff = Date.now() - t;
-  if (diff < 60000) return '刚刚';
-  if (diff < 3600000) return Math.floor(diff / 60000) + ' 分钟前';
-  if (diff < 86400000) return Math.floor(diff / 3600000) + ' 小时前';
-  if (diff < 30 * 86400000) return Math.floor(diff / 86400000) + ' 天前';
-  const d = new Date(t);
+  const t0 = Date.parse(iso);
+  if (Number.isNaN(t0)) return '';
+  const diff = Date.now() - t0;
+  const en = CUR_LANG === 'en';
+  if (diff < 60000) return t('刚刚');
+  if (diff < 3600000) { const m = Math.floor(diff / 60000); return en ? m + 'm ago' : m + ' 分钟前'; }
+  if (diff < 86400000) { const h = Math.floor(diff / 3600000); return en ? h + 'h ago' : h + ' 小时前'; }
+  if (diff < 30 * 86400000) { const d = Math.floor(diff / 86400000); return en ? d + 'd ago' : d + ' 天前'; }
+  const d = new Date(t0);
   const pad = (x) => String(x).padStart(2, '0');
   return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
 }
@@ -233,33 +361,33 @@ function codeBlock(lang, codeText) {
   // HTML 代码块：沙箱 iframe 实时预览
   const isHtml = /^(html?|xml|svg)$/i.test(lang) || /^\s*(<!doctype html|<html)/i.test(codeText);
   if (isHtml) {
-    const pv = el('button', 'codeblock-copy', '▶ 预览');
+    const pv = el('button', 'codeblock-copy', t('▶ 预览'));
     pv.type = 'button';
     let frame = null;
     pv.addEventListener('click', () => {
       if (frame) {
         frame.remove();
         frame = null;
-        pv.textContent = '▶ 预览';
+        pv.textContent = t('▶ 预览');
         return;
       }
       frame = el('iframe', 'html-preview');
       frame.setAttribute('sandbox', 'allow-scripts'); // 隔离源：不能访问本应用/本地存储
       frame.srcdoc = codeText;
       wrap.appendChild(frame);
-      pv.textContent = '✕ 收起预览';
+      pv.textContent = t('✕ 收起预览');
     });
     head.appendChild(pv);
   }
-  const btn = el('button', 'codeblock-copy', '⧉ 复制');
+  const btn = el('button', 'codeblock-copy', t('⧉ 复制'));
   btn.type = 'button';
   btn.addEventListener('click', () => {
     navigator.clipboard
       .writeText(codeText)
       .then(() => {
-        btn.textContent = '✓ 已复制';
+        btn.textContent = t('✓ 已复制');
         setTimeout(() => {
-          btn.textContent = '⧉ 复制';
+          btn.textContent = t('⧉ 复制');
         }, 1500);
       })
       .catch(() => {});
@@ -358,7 +486,7 @@ async function openLocalPath(path) {
       project: state.session ? state.session.project : state.project,
     });
   } catch (e) {
-    alert('打开失败：' + e.message);
+    alert(t('打开失败：') + e.message);
   }
 }
 
@@ -374,7 +502,7 @@ function renderSkeleton(container, n, wide) {
 function errorRow(msg, retry) {
   const d = el('div', 'empty');
   d.appendChild(document.createTextNode(msg + ' '));
-  const a = el('button', 'link-btn', '重试');
+  const a = el('button', 'link-btn', t('重试'));
   a.type = 'button';
   a.addEventListener('click', retry);
   d.appendChild(a);
@@ -555,11 +683,11 @@ function openSkillPicker(anchor, fromSlash) {
   menu.addEventListener('click', (e) => e.stopPropagation());
   const search = el('input', 'skill-search');
   search.type = 'text';
-  search.placeholder = '筛选技能 / 命令…';
+  search.placeholder = t('筛选技能 / 命令…');
   search.autocomplete = 'off';
   search.spellcheck = false;
   const listBox = el('div', 'skill-list');
-  listBox.appendChild(el('div', 'empty', '加载技能中…'));
+  listBox.appendChild(el('div', 'empty', t('加载技能中…')));
   menu.appendChild(search);
   menu.appendChild(listBox);
   document.body.appendChild(menu);
@@ -597,10 +725,10 @@ function openSkillPicker(anchor, fromSlash) {
     );
     if (!filtered.length) {
       const msg = all.length
-        ? '没有匹配的技能'
+        ? t('没有匹配的技能')
         : currentAgent() === 'codex'
-          ? '未发现 Codex 自定义 prompt（~/.codex/prompts/*.md）'
-          : '未发现技能';
+          ? t('未发现 Codex 自定义 prompt（~/.codex/prompts/*.md）')
+          : t('未发现技能');
       listBox.appendChild(el('div', 'empty', msg));
       return;
     }
@@ -650,7 +778,7 @@ function openSkillPicker(anchor, fromSlash) {
     .catch((e) => {
       if (menuEl !== menu) return;
       listBox.textContent = '';
-      listBox.appendChild(el('div', 'empty', '技能加载失败：' + e.message));
+      listBox.appendChild(el('div', 'empty', t('技能加载失败：') + e.message));
     });
 }
 
@@ -686,7 +814,7 @@ async function addAttachment(file) {
     renderAttachBar();
     hideComposerError();
   } catch (e) {
-    showComposerError('图片上传失败：' + e.message);
+    showComposerError(t('图片上传失败：') + e.message);
   }
 }
 
@@ -703,7 +831,7 @@ function renderAttachBar() {
     chip.appendChild(img);
     const x = el('button', 'attach-x', '×');
     x.type = 'button';
-    x.title = '移除图片';
+    x.title = t('移除图片');
     x.addEventListener('click', () => {
       state.attachments.splice(idx, 1);
       renderAttachBar();
@@ -721,7 +849,7 @@ function cliRow(name, st) {
   const dot = el('span', 'cli-dot ' + (st.installed ? 'ok' : 'bad'), '●');
   row.appendChild(dot);
   row.appendChild(
-    el('span', 'cli-name', name + (st.installed ? (st.version ? ' ' + st.version : ' 已安装') : ' 未安装'))
+    el('span', 'cli-name', name + (st.installed ? (st.version ? ' ' + st.version : ' ' + t('已安装')) : ' ' + t('未安装')))
   );
   row.title = st.path || st.error || '';
   return row;
@@ -730,7 +858,7 @@ function cliRow(name, st) {
 async function loadStatus() {
   const box = $('#cli-status');
   box.textContent = '';
-  box.appendChild(el('div', 'cli-row dim', '检测 CLI 中…'));
+  box.appendChild(el('div', 'cli-row dim', t('检测 CLI 中…')));
   try {
     const st = await api.get('/api/status');
     box.textContent = '';
@@ -738,7 +866,7 @@ async function loadStatus() {
     box.appendChild(cliRow('Codex', st.codex));
   } catch (e) {
     box.textContent = '';
-    const row = el('div', 'cli-row bad-text', 'CLI 状态获取失败');
+    const row = el('div', 'cli-row bad-text', t('CLI 状态获取失败'));
     row.title = e.message;
     box.appendChild(row);
   }
@@ -753,7 +881,7 @@ async function loadProjects() {
     state.projects = await api.get('/api/projects');
   } catch (e) {
     listEl.textContent = '';
-    listEl.appendChild(errorRow('项目加载失败', loadProjects));
+    listEl.appendChild(errorRow(t('项目加载失败'), loadProjects));
     return;
   }
   renderProjects();
@@ -771,7 +899,7 @@ function renderProjects() {
   const listEl = $('#project-list');
   listEl.textContent = '';
   if (!state.projects.length) {
-    listEl.appendChild(el('div', 'empty', '还未导入项目，点「＋」从历史中选择'));
+    listEl.appendChild(el('div', 'empty', t('还未导入项目，点「＋」从历史中选择')));
     return;
   }
   for (const p of state.projects) {
@@ -832,7 +960,7 @@ async function addProject(setCurrent) {
       return;
     }
     // 系统对话框不可用（非 Windows 等）时回退手动输入
-    path = prompt('输入项目目录的完整路径（如 D:\\project\\demo）');
+    path = prompt(t('输入项目目录的完整路径'));
   }
   if (!path || !path.trim()) return;
   const trimmed = path.trim();
@@ -842,7 +970,7 @@ async function addProject(setCurrent) {
     renderProjects();
     if (setCurrent) setProject(trimmed);
   } catch (e) {
-    alert('添加项目失败：' + e.message);
+    alert(t('添加项目失败：') + e.message);
   }
 }
 
@@ -867,10 +995,10 @@ async function openProjectPicker(anchor) {
   menu.addEventListener('click', (e) => e.stopPropagation());
   const search = el('input', 'skill-search');
   search.type = 'text';
-  search.placeholder = '搜索历史项目（名称 / 路径）…';
+  search.placeholder = t('搜索历史项目（名称 / 路径）…');
   search.autocomplete = 'off';
   const listBox = el('div', 'skill-list');
-  listBox.appendChild(el('div', 'empty', '扫描历史项目中…'));
+  listBox.appendChild(el('div', 'empty', t('扫描历史项目中…')));
   const manual = el('button', 'menu-item', '📁 浏览文件夹导入…');
   manual.type = 'button';
   manual.addEventListener('click', () => {
@@ -901,7 +1029,7 @@ async function openProjectPicker(anchor) {
       (p) => !q || (p.name || '').toLowerCase().includes(q) || (p.path || '').toLowerCase().includes(q)
     );
     if (!filtered.length) {
-      listBox.appendChild(el('div', 'empty', all.length ? '没有匹配的项目' : '历史中没有发现项目'));
+      listBox.appendChild(el('div', 'empty', all.length ? t('没有匹配的项目') : t('历史中没有发现项目')));
       return;
     }
     for (const p of filtered.slice(0, 200)) {
@@ -910,12 +1038,12 @@ async function openProjectPicker(anchor) {
       const line = el('div', 'skill-line');
       line.appendChild(el('span', 'skill-name', p.name || p.path));
       line.appendChild(
-        el('span', 'skill-src', p.claude_sessions + p.codex_sessions + ' 会话 · ' + relTime(p.last_active))
+        el('span', 'skill-src', p.claude_sessions + p.codex_sessions + ' ' + t('会话') + ' · ' + relTime(p.last_active))
       );
       info.appendChild(line);
       info.appendChild(el('span', 'skill-desc', p.path));
       row.appendChild(info);
-      const btn = el('button', 'pick-btn' + (p.pinned ? ' on' : ''), p.pinned ? '移除' : '导入');
+      const btn = el('button', 'pick-btn' + (p.pinned ? ' on' : ''), p.pinned ? t('移除') : t('导入'));
       btn.type = 'button';
       btn.addEventListener('click', async () => {
         btn.disabled = true;
@@ -930,7 +1058,7 @@ async function openProjectPicker(anchor) {
           if (p.pinned && !state.project) setProject(p.path);
           render();
         } catch (e) {
-          alert('操作失败：' + e.message);
+          alert(t('操作失败：') + e.message);
           btn.disabled = false;
         }
       });
@@ -946,7 +1074,7 @@ async function openProjectPicker(anchor) {
   } catch (e) {
     if (menuEl !== menu) return;
     listBox.textContent = '';
-    listBox.appendChild(el('div', 'empty', '扫描失败：' + e.message));
+    listBox.appendChild(el('div', 'empty', t('扫描失败：') + e.message));
   }
 }
 
@@ -960,10 +1088,10 @@ function sessionRow(s) {
   const dot = el('span', 'agent-dot ' + (cfg ? cfg.cls : 'ag-codex'));
   dot.appendChild(agentIcon(s.agent, 12));
   row.appendChild(dot);
-  row.appendChild(el('span', 'srow-title', s.title || '(无标题)'));
+  row.appendChild(el('span', 'srow-title', s.title || t('(无标题)')));
   applyRunBadge(row, state.runsIndex[s.id]);
   row.appendChild(el('span', 'srow-time', relTime(s.updated || s.created)));
-  row.title = (s.title || '(无标题)') + '\n' + (s.project || '') + (s.archived ? '\n（已归档）' : '');
+  row.title = (s.title || t('(无标题)')) + '\n' + (s.project || '') + (s.archived ? '\n（已归档）' : '');
   row.addEventListener('click', () => openSession(s));
   return row;
 }
@@ -976,7 +1104,7 @@ async function loadConvs() {
     renderSessionList(listEl, sessions, 'convs');
   } catch (e) {
     listEl.textContent = '';
-    listEl.appendChild(errorRow('会话加载失败', loadConvs));
+    listEl.appendChild(errorRow(t('会话加载失败'), loadConvs));
   }
 }
 
@@ -998,14 +1126,14 @@ async function onSearch() {
     const sessions = filterSessions(raw);
     listEl.textContent = '';
     if (!sessions.length) {
-      listEl.appendChild(el('div', 'empty', '没有匹配的会话'));
+      listEl.appendChild(el('div', 'empty', t('没有匹配的会话')));
       return;
     }
     for (const s of sessions) listEl.appendChild(sessionRow(s));
   } catch (e) {
     if (seq !== state.searchSeq) return;
     listEl.textContent = '';
-    listEl.appendChild(el('div', 'empty', '搜索失败：' + e.message));
+    listEl.appendChild(el('div', 'empty', t('搜索失败：') + e.message));
   }
 }
 
@@ -1068,7 +1196,7 @@ function renderSessionList(listEl, sessions, key) {
   sessions = filterSessions(sessions);
   listEl.textContent = '';
   if (!sessions.length) {
-    listEl.appendChild(el('div', 'empty', '暂无对话'));
+    listEl.appendChild(el('div', 'empty', t('暂无对话')));
     return;
   }
   const expanded = listExpanded.has(key);
@@ -1078,7 +1206,7 @@ function renderSessionList(listEl, sessions, key) {
     const btn = el(
       'button',
       'link-btn more-btn',
-      expanded ? '收起' : '显示全部 ' + sessions.length + ' 条'
+      expanded ? t('收起') : tShowAll(sessions.length)
     );
     btn.type = 'button';
     btn.addEventListener('click', () => {
@@ -1106,7 +1234,7 @@ function applyRunBadge(row, st) {
   const cls = st.running ? 'running' : st.ok ? 'ok' : 'err';
   b.className = 'run-badge ' + cls;
   b.textContent = st.running ? '●' : st.ok ? '✓' : '✕';
-  b.title = st.running ? '运行中' : st.ok ? '已完成' : '运行出错：' + (st.error || '未知错误');
+  b.title = st.running ? t('运行中') : st.ok ? t('已完成') : t('运行出错：') + (st.error || t('未知错误'));
 }
 
 function refreshRunBadges() {
@@ -1219,11 +1347,11 @@ const EFFORT_LABELS = {
 };
 
 function effortLabel() {
-  if (state.effort !== null) return '思考·' + (EFFORT_LABELS[state.effort] || state.effort) + ' ⌄';
-  // 默认态直接展示实际默认思考强度
+  const pre = CUR_LANG === 'en' ? 'Effort·' : '思考·';
+  if (state.effort !== null) return pre + t(EFFORT_LABELS[state.effort] || state.effort) + ' ⌄';
   const info = state.modelsInfo && state.modelsInfo[currentAgent()];
   const de = info && info.default_effort;
-  return '思考·' + (de ? EFFORT_LABELS[de] || de : '默认') + ' ⌄';
+  return pre + (de ? t(EFFORT_LABELS[de] || de) : t('默认')) + ' ⌄';
 }
 
 /** 会话一旦有 id（历史打开或新会话已落盘），agent 即锁定不可切换 */
@@ -1245,31 +1373,33 @@ function syncAgentUI() {
   if (canSwitchAgent()) {
     badge.classList.remove('locked');
     badge.appendChild(el('span', 'caret', ' ⌄'));
-    badge.title = '切换 Agent';
+    badge.title = t('切换 Agent');
   } else {
     badge.classList.add('locked');
-    badge.title = '会话已绑定 ' + AGENTS[currentAgent()].label + '，新建会话可切换';
+    badge.title = tBound(AGENTS[currentAgent()].label);
   }
   $('#perm-btn').textContent = permLabel();
   $('#effort-btn').textContent = effortLabel();
-  $('#model-btn').textContent = modelLabel();
+  const mb = $('#model-btn');
+  mb.textContent = modelLabel();
+  mb.title = '模型：' + modelFull();
   // 快速：claude = fastMode 设置；codex = 低思考等级快捷开关
   // （实测 codex CLI 0.148 无 speed tier 参数；官方对 low 的描述即 fast responses）
   // SAGE 智能路由：只对新会话有意义（已绑定会话隐藏）
   const sageBtn = $('#sage-btn');
   sageBtn.classList.toggle('hidden', !canSwitchAgent());
   sageBtn.classList.toggle('on', state.sageOn);
-  sageBtn.textContent = state.sageOn ? '🧭 智能路由·开' : '🧭 智能路由';
+  sageBtn.textContent = state.sageOn ? t('🧭 智能路由·开') : t('🧭 智能路由');
   const fastBtn = $('#fast-btn');
   fastBtn.classList.remove('hidden');
   if (currentAgent() === 'claude') {
     fastBtn.classList.toggle('on', state.fast);
-    fastBtn.textContent = state.fast ? '⚡ 快速·开' : '⚡ 快速';
+    fastBtn.textContent = state.fast ? t('⚡ 快速·开') : t('⚡ 快速');
     fastBtn.title = '快速模式：以 fastMode 设置运行（需模型支持）';
   } else {
     const on = state.effort === 'low';
     fastBtn.classList.toggle('on', on);
-    fastBtn.textContent = on ? '⚡ 快速·开' : '⚡ 快速';
+    fastBtn.textContent = on ? t('⚡ 快速·开') : t('⚡ 快速');
     fastBtn.title = '快速：切换到低思考等级（Codex CLI 无速度档参数，low 即官方的快速响应档）';
   }
 }
@@ -1285,14 +1415,20 @@ function setBadge(target, agent) {
 
 function permLabel() {
   const f = AGENTS[state.agent].permissions.find((p) => p.value === state.permission);
-  return (f ? f.label : state.permission) + ' ⌄';
+  return t(f ? f.label : state.permission) + ' ⌄';
+}
+
+function modelFull() {
+  if (state.model !== null) return state.model;
+  const info = state.modelsInfo && state.modelsInfo[currentAgent()];
+  return info && info.default ? info.default : t('默认模型');
 }
 
 function modelLabel() {
-  if (state.model !== null) return state.model + ' ⌄';
-  // 默认态直接展示实际默认模型名
-  const info = state.modelsInfo && state.modelsInfo[currentAgent()];
-  return (info && info.default ? info.default : '默认模型') + ' ⌄';
+  // 长模型名截断展示，完整名放悬停提示（syncAgentUI 里设置 title）
+  const full = modelFull();
+  const short = full.length > 14 ? full.slice(0, 12) + '…' : full;
+  return short + ' ⌄';
 }
 
 /** /api/models 结果缓存（Promise，失败重试） */
@@ -1313,7 +1449,7 @@ function showHero() {
   $('#view-chat').classList.add('hidden');
   $('#view-hero').classList.remove('hidden');
   $('#hero-slot').appendChild(composerEl);
-  promptInput.placeholder = '输入你的任务…';
+  promptInput.placeholder = t('输入你的任务…');
   hideComposerError();
   setActiveRow(null);
   syncAgentUI(); // 解锁 agent 切换
@@ -1351,7 +1487,7 @@ function onNewSession() {
 
 function setChatHead(sess) {
   setBadge($('#chat-agent-badge'), sess.agent);
-  $('#chat-title').textContent = sess.title || '(无标题)';
+  $('#chat-title').textContent = sess.title || t('(无标题)');
   const proj = $('#chat-project');
   proj.textContent = sess.project || '';
   proj.title = sess.project || '';
@@ -1380,7 +1516,7 @@ function imageEl(src) {
   img.src = url;
   img.loading = 'lazy';
   img.alt = '图片';
-  img.title = '点击放大';
+  img.title = t('点击放大');
   img.addEventListener('click', () => openLightbox(url));
   img.addEventListener('error', () => {
     img.replaceWith(el('div', 'md-text img-ph', '[图片加载失败] ' + snippet(src, 80)));
@@ -1414,12 +1550,12 @@ function openLightbox(url) {
   ov.appendChild(img);
 
   const bar = el('div', 'lightbox-bar');
-  const openTab = el('a', 'lightbox-btn', '⧉ 新标签打开');
+  const openTab = el('a', 'lightbox-btn', t('⧉ 新标签打开'));
   openTab.href = url;
   openTab.target = '_blank';
   openTab.rel = 'noopener';
   openTab.addEventListener('click', (e) => e.stopPropagation());
-  const closeBtn = el('button', 'lightbox-btn', '✕ 关闭');
+  const closeBtn = el('button', 'lightbox-btn', t('✕ 关闭'));
   closeBtn.type = 'button';
   closeBtn.addEventListener('click', closeLightbox);
   bar.appendChild(openTab);
@@ -1486,7 +1622,7 @@ function thinkingCard(text, open) {
   const card = el('div', 'card thinking' + (open ? ' open' : ''));
   const head = el('div', 'card-head');
   head.appendChild(el('span', 'card-caret', '▸'));
-  head.appendChild(el('span', 'card-title', '💭 思考过程'));
+  head.appendChild(el('span', 'card-title', t('💭 思考过程')));
   const body = el('div', 'card-body think-body', text || '');
   card.appendChild(head);
   card.appendChild(body);
@@ -1526,7 +1662,7 @@ function ensureToolGroup(ctx) {
   const head = el('div', 'tgroup-head');
   const ico = el('span', 'tgroup-ico', '⊡');
   head.appendChild(ico);
-  const label = el('span', 'tgroup-label', '运行了命令');
+  const label = el('span', 'tgroup-label', t('运行了命令'));
   head.appendChild(label);
   const body = el('div', 'tgroup-body');
   root.appendChild(head);
@@ -1540,10 +1676,10 @@ function ensureToolGroup(ctx) {
 /** 参考 Codex Desktop：类别名直接连写，如「编辑了文件读取了文件运行了命令」 */
 function groupLabel(g) {
   const parts = [];
-  if (g.edit) parts.push('编辑了文件');
-  if (g.read) parts.push('读取了文件');
-  if (g.run) parts.push('运行了命令');
-  return parts.length ? parts.join('') : '执行了操作';
+  if (g.edit) parts.push(t('编辑了文件'));
+  if (g.read) parts.push(t('读取了文件'));
+  if (g.run) parts.push(t('运行了命令'));
+  return parts.length ? parts.join(CUR_LANG === 'en' ? ' · ' : '') : t('执行了操作');
 }
 
 /** 文本/思考/分隔出现时结束当前分组（后续工具开新组） */
@@ -1589,7 +1725,7 @@ function filesCard(files, project) {
   const head = el('div', 'files-head');
   head.appendChild(el('span', 'files-ico-box', '🗂'));
   const col = el('div', 'files-head-col');
-  col.appendChild(el('div', 'files-title', '已编辑 ' + files.length + ' 个文件'));
+  col.appendChild(el('div', 'files-title', tEditedFiles(files.length)));
   const totals = el('div', 'files-totals');
   col.appendChild(totals);
   head.appendChild(col);
@@ -1603,7 +1739,7 @@ function filesCard(files, project) {
     list.appendChild(r);
   });
   if (rows.length > LIMIT) {
-    const more = el('button', 'files-more', '再显示 ' + (rows.length - LIMIT) + ' 个文件 ⌄');
+    const more = el('button', 'files-more', tMoreFiles(rows.length - LIMIT));
     more.type = 'button';
     let open = false;
     more.addEventListener('click', () => {
@@ -1611,7 +1747,7 @@ function filesCard(files, project) {
       rows.forEach((r, i) => {
         if (i >= LIMIT) r.classList.toggle('hidden', !open);
       });
-      more.textContent = open ? '收起文件 ⌃' : '再显示 ' + (rows.length - LIMIT) + ' 个文件 ⌄';
+      more.textContent = open ? t('收起文件 ⌃') : tMoreFiles(rows.length - LIMIT);
     });
     card.appendChild(more);
   }
@@ -1657,7 +1793,7 @@ function fileRow(f, project) {
   pathEl.appendChild(el('span', 'files-name', norm.slice(idx + 1)));
   row.appendChild(pathEl);
   row.appendChild(el('span', 'files-diffstat'));
-  row.title = f + '\n点击查看差异 · 右键更多操作';
+  row.title = f + '\n' + t('点击查看差异 · 右键更多操作');
   row.addEventListener('click', () => openDiffModal(project, f));
   row.addEventListener('contextmenu', (e) => {
     e.preventDefault();
@@ -1691,7 +1827,7 @@ async function openDiffModal(project, file) {
   head.appendChild(x);
   panel.appendChild(head);
   const body = el('div', 'diff-body');
-  body.appendChild(el('div', 'empty', '加载差异中…'));
+  body.appendChild(el('div', 'empty', t('加载差异中…')));
   panel.appendChild(body);
   ov.appendChild(panel);
   ov.addEventListener('click', (e) => {
@@ -1714,7 +1850,7 @@ async function openDiffModal(project, file) {
     if (d && d.source) srcTag.textContent = d.source;
     const txt = (d && d.diff) || '';
     if (!txt.trim()) {
-      body.appendChild(el('div', 'empty', '没有可显示的差异（可能已提交，或与 HEAD 一致）'));
+      body.appendChild(el('div', 'empty', t('没有可显示的差异（可能已提交，或与 HEAD 一致）')));
       return;
     }
     let oldLn = 1;
@@ -1756,7 +1892,7 @@ async function openDiffModal(project, file) {
     stats.appendChild(el('span', 'stat-del', '-' + dels));
   } catch (e) {
     body.textContent = '';
-    body.appendChild(el('div', 'empty', '差异加载失败：' + e.message));
+    body.appendChild(el('div', 'empty', t('差异加载失败：') + e.message));
   }
 }
 
@@ -1766,21 +1902,21 @@ function showFileMenu(e, file, project) {
   const menu = el('div', 'menu');
   menu.addEventListener('click', (ev) => ev.stopPropagation());
   const items = [
-    ['在 VS Code 中打开', () =>
-      api.post('/api/open', { path: file, project }).catch((er) => alert('打开失败：' + er.message))],
-    ['在资源管理器中打开', () =>
+    [t('在 VS Code 中打开'), () =>
+      api.post('/api/open', { path: file, project }).catch((er) => alert(t('打开失败：') + er.message))],
+    [t('在资源管理器中打开'), () =>
       api
         .post('/api/open', { path: file, project, mode: 'reveal' })
-        .catch((er) => alert('打开失败：' + er.message))],
-    ['复制路径', () => navigator.clipboard.writeText(file).catch(() => {})],
-    ['复制文件内容', async () => {
+        .catch((er) => alert(t('打开失败：') + er.message))],
+    [t('复制路径'), () => navigator.clipboard.writeText(file).catch(() => {})],
+    [t('复制文件内容'), async () => {
       try {
         const d = await api.get(
           '/api/filetext?' + new URLSearchParams({ path: file, project: project || '' })
         );
         await navigator.clipboard.writeText(d.text || '');
       } catch (er) {
-        alert('复制失败：' + er.message);
+        alert(t('复制失败：') + er.message);
       }
     }],
   ];
@@ -1814,7 +1950,7 @@ function renderPlanInto(card, items) {
   card.textContent = '';
   const doneN = items.filter((i) => i.status === 'completed').length;
   const head = el('div', 'plan-head');
-  head.appendChild(el('span', 'plan-title', '📋 任务计划'));
+  head.appendChild(el('span', 'plan-title', t('📋 任务计划')));
   head.appendChild(el('span', 'plan-progress', doneN + ' / ' + items.length));
   card.appendChild(head);
   const box = el('div', 'plan-steps');
@@ -1914,7 +2050,7 @@ function renderUserMsg(container, blocks, lastAsst) {
 
 function renderTranscript(container, t) {
   if (!t.messages || !t.messages.length) {
-    container.appendChild(el('div', 'empty center', '（此会话没有可显示的消息）'));
+    container.appendChild(el('div', 'empty center', t('（此会话没有可显示的消息）')));
     return;
   }
   let lastAsst = null;
@@ -1954,7 +2090,7 @@ async function attachRun(runId, sess) {
   state.streaming = true;
   setSendButton(true);
   beginAssistant();
-  stream.ctx.bodyEl.appendChild(renderDivider('页面重连 · 以下为实时输出'));
+  stream.ctx.bodyEl.appendChild(renderDivider(t('页面重连 · 以下为实时输出')));
   stream.ctx.bodyEl.appendChild(cursorEl);
   const ac = new AbortController();
   state.abort = ac;
@@ -1993,13 +2129,13 @@ async function maybeAttachSessionRun(s) {
 
 async function openSession(s) {
   if (state.streaming) detachViewer(); // 任务转后台继续，不中断
-  state.session = { agent: s.agent, id: s.id, project: s.project, title: s.title || '(无标题)' };
+  state.session = { agent: s.agent, id: s.id, project: s.project, title: s.title || t('(无标题)') };
   setAgent(s.agent); // 权限/模型下拉选项联动到该会话的 agent
   expandProjectFor(state.session); // 侧栏展开所属项目并定位
   setActiveRow(s.agent + ':' + s.id);
   showChat();
   setChatHead(state.session);
-  promptInput.placeholder = '继续这个会话…';
+  promptInput.placeholder = t('继续这个会话…');
   hideComposerError();
   chatMsgs.textContent = '';
   renderSkeleton(chatMsgs, 4, true);
@@ -2018,8 +2154,8 @@ async function openSession(s) {
   } catch (e) {
     if (!state.session || state.session.id !== s.id || state.session.agent !== s.agent) return;
     chatMsgs.textContent = '';
-    chatMsgs.appendChild(el('div', 'error-bar', '转录加载失败：' + e.message));
-    const retry = el('button', 'btn-ghost retry', '重试');
+    chatMsgs.appendChild(el('div', 'error-bar', t('转录加载失败：') + e.message));
+    const retry = el('button', 'btn-ghost retry', t('重试'));
     retry.type = 'button';
     retry.addEventListener('click', () => openSession(s));
     chatMsgs.appendChild(retry);
@@ -2057,10 +2193,11 @@ function beginAssistant() {
 /** 耗时格式化：45 秒 / 3分15秒 / 1小时02分 */
 function fmtDuration(ms) {
   const s = Math.round(ms / 1000);
-  if (s < 60) return s + ' 秒';
+  const en = CUR_LANG === 'en';
+  if (s < 60) return en ? s + 's' : s + ' 秒';
   const m = Math.floor(s / 60);
-  if (m < 60) return m + '分' + String(s % 60).padStart(2, '0') + '秒';
-  return Math.floor(m / 60) + '小时' + String(m % 60).padStart(2, '0') + '分';
+  if (m < 60) return en ? m + 'm' + String(s % 60).padStart(2, '0') + 's' : m + '分' + String(s % 60).padStart(2, '0') + '秒';
+  return en ? Math.floor(m / 60) + 'h' + String(m % 60).padStart(2, '0') + 'm' : Math.floor(m / 60) + '小时' + String(m % 60).padStart(2, '0') + '分';
 }
 
 function finalizeCur() {
@@ -2198,13 +2335,13 @@ function handleEvent(ev) {
       flushFilesCard(stream.ctx); // 汇总本轮编辑的文件卡片
       if (!ev.ok) {
         if (ev.error === '已停止') {
-          stream.ctx.bodyEl.appendChild(el('div', 'status-line', '■ 已停止'));
+          stream.ctx.bodyEl.appendChild(el('div', 'status-line', t('■ 已停止')));
         } else {
-          stream.ctx.bodyEl.appendChild(el('div', 'error-bar', ev.error || '运行失败（无错误信息）'));
+          stream.ctx.bodyEl.appendChild(el('div', 'error-bar', ev.error || t('运行失败（无错误信息）')));
         }
       } else if (stream.startedAt && Date.now() - stream.startedAt > 3000) {
         stream.ctx.bodyEl.appendChild(
-          el('div', 'done-line', '已处理 ' + fmtDuration(Date.now() - stream.startedAt))
+          el('div', 'done-line', t('已处理') + ' ' + fmtDuration(Date.now() - stream.startedAt))
         );
       }
       break;
@@ -2290,20 +2427,20 @@ function sageCard(d) {
   head.appendChild(el('span', 'card-caret', '▸'));
   const who = AGENTS[d.primary] ? AGENTS[d.primary].label : d.primary;
   head.appendChild(
-    el('span', 'card-title', '🧭 SAGE 路由 · ' + (MODE_CN[d.mode] || d.mode) + ' → ' + who)
+    el('span', 'card-title', t('🧭 SAGE 路由') + ' · ' + t(MODE_CN[d.mode] || d.mode) + ' → ' + who)
   );
   const body = el('div', 'card-body');
   const lines = [];
   const reqs = Object.entries(d.requirements || {})
     .map(([k, v]) => k + ' ' + v)
     .join('，');
-  if (reqs) lines.push('需求推断：' + reqs);
+  if (reqs) lines.push(t('需求推断：') + reqs);
   if (d.partner) {
     const p = AGENTS[d.partner] ? AGENTS[d.partner].label : d.partner;
-    lines.push('协作建议：完成后可用 ' + p + ' 复查');
+    lines.push(t('协作建议：完成后可用 ') + p + t(' 复查'));
   }
   lines.push(
-    '成功率 ' + d.success_probability + ' · 覆盖 ' + d.coverage + ' · 效用 ' + d.utility
+    t('成功率 ') + d.success_probability + t(' · 覆盖 ') + d.coverage + t(' · 效用 ') + d.utility
   );
   if (d.explanation) lines.push(d.explanation);
   const pre = el('pre', 'io-pre');
@@ -2325,7 +2462,7 @@ async function onSend() {
   let sageInfo = null;
   if (state.sageOn && !state.session && text && !text.startsWith('/')) {
     const btn = $('#sage-btn');
-    btn.textContent = '🧭 路由中…';
+    btn.textContent = t('🧭 路由中…');
     try {
       sageInfo = await api.post('/api/sage', { prompt: text, agent: state.agent });
       if (
@@ -2345,7 +2482,7 @@ async function onSend() {
   if (!state.session) {
     // Hero 新会话
     if (!state.project) {
-      showComposerError('请先选择项目目录（输入卡片下方的项目选择器）');
+      showComposerError(t('请先选择项目目录（输入卡片下方的项目选择器）'));
       return;
     }
     state.session = {
@@ -2398,9 +2535,9 @@ async function onSend() {
   } catch (err) {
     if (stream) {
       if (err && err.name === 'AbortError') {
-        stream.ctx.bodyEl.appendChild(el('div', 'status-line', '↪ 已断开查看，任务在后台继续'));
+        stream.ctx.bodyEl.appendChild(el('div', 'status-line', t('↪ 已断开查看，任务在后台继续')));
       } else {
-        stream.ctx.bodyEl.appendChild(el('div', 'error-bar', '请求失败：' + ((err && err.message) || err)));
+        stream.ctx.bodyEl.appendChild(el('div', 'error-bar', t('请求失败：') + ((err && err.message) || err)));
       }
     }
   } finally {
@@ -2410,7 +2547,7 @@ async function onSend() {
     state.runId = null;
     setSendButton(false);
     // 若期间已切回 Hero（新建会话），不要覆盖它的 placeholder
-    if (state.session) promptInput.placeholder = '继续这个会话…';
+    if (state.session) promptInput.placeholder = t('继续这个会话…');
     promptInput.focus();
     // 会话文件已落盘，刷新侧栏（列表与项目计数）
     loadConvs();
@@ -2470,9 +2607,12 @@ function renderPromptHl() {
 
 function bindEvents() {
   // 输入卡片
-  promptInput.addEventListener('input', () => {
+  promptInput.addEventListener('input', (e) => {
     autoGrow();
-    if (promptInput.value === '/') openSkillPicker($('#skill-btn'), true);
+    // 仅在「刚键入 /」时弹技能面板；删除退回到 / 不再误触发
+    if (e.inputType === 'insertText' && e.data === '/' && promptInput.value === '/') {
+      openSkillPicker($('#skill-btn'), true);
+    }
   });
   promptInput.addEventListener('scroll', () => {
     const hl = $('#prompt-hl');
@@ -2552,7 +2692,7 @@ function bindEvents() {
     e.stopPropagation();
     const items = AGENTS[state.agent].permissions.map((p) => ({
       value: p.value,
-      label: p.label,
+      label: t(p.label),
       checked: p.value === state.permission,
     }));
     showMenu(e.currentTarget, items, (it) => {
@@ -2578,15 +2718,15 @@ function bindEvents() {
       {
         value: null,
         label: '默认',
-        hint: info.default_effort ? EFFORT_LABELS[info.default_effort] || info.default_effort : '',
+        hint: info.default_effort ? t(EFFORT_LABELS[info.default_effort] || info.default_effort) : '',
         checked: state.effort === null,
       },
     ];
     for (const ef of efforts) {
       items.push({
         value: ef,
-        label: (EFFORT_LABELS[ef] || ef) + '（' + ef + '）',
-        hint: ef === info.default_effort ? '全局默认' : '',
+        label: t(EFFORT_LABELS[ef] || ef) + '（' + ef + '）',
+        hint: ef === info.default_effort ? t('全局默认') : '',
         checked: ef === state.effort,
       });
     }
@@ -2611,7 +2751,7 @@ function bindEvents() {
     const items = [
       {
         value: null,
-        label: '默认模型',
+        label: t('默认模型'),
         hint: info.default || '',
         checked: state.model === null,
       },
@@ -2620,7 +2760,7 @@ function bindEvents() {
       items.push({
         value: m,
         label: m,
-        hint: m === info.default ? '全局默认' : '',
+        hint: m === info.default ? t('全局默认') : '',
         checked: m === state.model,
       });
     }
@@ -2630,7 +2770,7 @@ function bindEvents() {
     items.push({ value: '__custom__', label: '自定义…' });
     showMenu(anchor, items, (it) => {
       if (it.value === '__custom__') {
-        const v = prompt('输入模型名');
+        const v = prompt(t('输入模型名'));
         if (v && v.trim()) state.model = v.trim();
       } else {
         state.model = it.value;
@@ -2649,7 +2789,7 @@ function bindEvents() {
       hint: p.path,
       checked: clientNorm(state.project) === clientNorm(p.path),
     }));
-    items.push({ value: '__browse__', label: '＋ 导入项目…' });
+    items.push({ value: '__browse__', label: t('＋ 导入项目…') });
     const anchor = e.currentTarget;
     showMenu(anchor, items, (it) => {
       if (it.value === '__browse__') openProjectPicker(anchor);
@@ -2667,9 +2807,32 @@ function bindEvents() {
   $('#head-projects').addEventListener('click', () => toggleGroup('projects'));
   $('#head-convs').addEventListener('click', () => toggleGroup('convs'));
 
-  // 左侧 agent 过滤图标栏
-  document.querySelectorAll('.rail-btn').forEach((b) => {
-    b.addEventListener('click', () => setAgentFilter(b.dataset.filter || ''));
+  // 设置：语言切换
+  $('#settings-btn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    const stored = localStorage.getItem('ah-lang');
+    showMenu(
+      e.currentTarget,
+      [
+        {
+          value: 'auto',
+          label: t('跟随浏览器'),
+          hint: browserLang() === 'zh' ? '简体中文' : 'English',
+          checked: !stored,
+        },
+        { value: 'zh', label: '简体中文', checked: stored === 'zh' },
+        { value: 'en', label: 'English', checked: stored === 'en' },
+      ],
+      (it) => setLang(it.value)
+    );
+  });
+
+  // 左侧 agent 过滤图标栏（再点已选中的 = 取消过滤回到全部）
+  document.querySelectorAll('.rail-btn[data-filter]').forEach((b) => {
+    b.addEventListener('click', () => {
+      const f = b.dataset.filter || '';
+      setAgentFilter(f === state.agentFilter ? '' : f);
+    });
   });
   $('#search-input').addEventListener('input', debounce(onSearch, 250));
 
@@ -2712,7 +2875,11 @@ function applyTheme(t, persist) {
 }
 
 function init() {
+  // 语言：?lang= 参数（调试用）> 记忆值 > 浏览器语言
+  const urlLang = new URLSearchParams(location.search).get('lang');
+  CUR_LANG = urlLang || localStorage.getItem('ah-lang') || browserLang();
   bindEvents();
+  applyLang();
   // 主题：?theme= 参数（调试用，不落存储）> 记忆值 > 暗色
   const urlTheme = new URLSearchParams(location.search).get('theme');
   applyTheme(urlTheme || localStorage.getItem('ah-theme') || 'dark', !urlTheme);

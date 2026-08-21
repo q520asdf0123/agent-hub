@@ -266,11 +266,11 @@ button { font-family: inherit; }
   vertical-align: 3px;
 }
 
-.composer-slot { width: 100%; max-width: 760px; }
+.composer-slot { width: 100%; max-width: 880px; }
 
 .hero-meta {
   width: 100%;
-  max-width: 760px;
+  max-width: 880px;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -1403,3 +1403,36 @@ button { font-family: inherit; }
 .agent-dot { display: inline-flex; align-items: center; justify-content: center; }
 .agent-dot svg { display: block; }
 .rail-btn svg, .mini-ico svg { display: block; }
+
+/* ---------- 右侧选择器药丸化（权限/思考/模型） ---------- */
+
+.composer-right { gap: 6px; }
+.composer-right .chip {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: 8px;
+  padding: 4px 10px;
+  white-space: nowrap;
+}
+.composer-right .chip:hover {
+  background: var(--hover);
+  border-color: var(--border2);
+}
+.composer-right .chip-perm { border-color: rgba(232, 150, 74, 0.35); }
+#model-btn { font-family: Consolas, "Cascadia Mono", monospace; font-size: 12.5px; }
+
+/* 工具条空间不足时自动换行，避免按钮被裁切 */
+.composer-bar { flex-wrap: wrap; row-gap: 6px; }
+.composer-left { flex-wrap: wrap; row-gap: 6px; }
+
+/* 图标栏底部：设置在上、主题在下 */
+.rail-settings {
+  margin-top: auto;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--dim);
+  font-size: 15px;
+  opacity: 1;
+}
+.rail-settings:hover { background: var(--hover); color: var(--fg); }
+.rail-theme { margin-top: 0; }
