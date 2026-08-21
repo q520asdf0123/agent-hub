@@ -938,7 +938,9 @@ function toggleProject(path) {
 async function fillProjectSessions(box, path) {
   renderSkeleton(box, 2);
   try {
-    const sessions = await api.get('/api/sessions?' + new URLSearchParams({ project: path }));
+    const sessions = await api.get(
+      '/api/sessions?' + new URLSearchParams({ project: path, limit: '500' })
+    );
     renderSessionList(box, sessions, path);
     const act = box.querySelector('.srow.active');
     if (act) act.scrollIntoView({ block: 'nearest' });
@@ -1139,8 +1141,16 @@ async function onSearch() {
 
 /* ---------- 分组收缩与「显示全部」 ---------- */
 
-/** 已展开全部的列表 key（'convs' 或项目路径）；分组收缩状态持久化 localStorage */
-const listExpanded = new Set();
+/** 各列表当前显示条数（key：'convs' 或项目路径）；分组收缩状态持久化 localStorage */
+const listShown = new Map();
+const LIST_BASE = 6;
+const LIST_STEP = 20;
+
+function tShowMore(step, remaining) {
+  return CUR_LANG === 'en'
+    ? 'Show ' + step + ' more (' + remaining + ' left)'
+    : '再显示 ' + step + ' 条（剩 ' + remaining + '）';
+}
 
 function collapsedGroups() {
   try {
@@ -1191,31 +1201,44 @@ function setAgentFilter(f) {
   if ($('#search-input').value.trim()) onSearch();
 }
 
-/** 会话列表：默认展示最近 6 条，超出折叠为「显示全部」 */
-function renderSessionList(listEl, sessions, key) {
+/** 会话列表：默认 6 条，点击阶梯式追加 20 条（新增行瀑布渐入），展开后可收起 */
+function renderSessionList(listEl, sessions, key, animateFrom) {
   sessions = filterSessions(sessions);
   listEl.textContent = '';
   if (!sessions.length) {
     listEl.appendChild(el('div', 'empty', t('暂无对话')));
     return;
   }
-  const expanded = listExpanded.has(key);
-  const show = expanded ? sessions : sessions.slice(0, 6);
-  for (const s of show) listEl.appendChild(sessionRow(s));
-  if (sessions.length > 6) {
-    const btn = el(
-      'button',
-      'link-btn more-btn',
-      expanded ? t('收起') : tShowAll(sessions.length)
-    );
-    btn.type = 'button';
-    btn.addEventListener('click', () => {
-      if (expanded) listExpanded.delete(key);
-      else listExpanded.add(key);
+  const shown = Math.min(listShown.get(key) || LIST_BASE, sessions.length);
+  for (let i = 0; i < shown; i++) {
+    const row = sessionRow(sessions[i]);
+    if (animateFrom !== undefined && i >= animateFrom) {
+      row.classList.add('row-in');
+      row.style.animationDelay = Math.min((i - animateFrom) * 25, 500) + 'ms';
+    }
+    listEl.appendChild(row);
+  }
+  const foot = el('div', 'list-foot');
+  if (shown < sessions.length) {
+    const remaining = sessions.length - shown;
+    const more = el('button', 'link-btn more-btn', tShowMore(Math.min(LIST_STEP, remaining), remaining));
+    more.type = 'button';
+    more.addEventListener('click', () => {
+      listShown.set(key, shown + LIST_STEP);
+      renderSessionList(listEl, sessions, key, shown);
+    });
+    foot.appendChild(more);
+  }
+  if (shown > LIST_BASE) {
+    const less = el('button', 'link-btn more-btn', t('收起'));
+    less.type = 'button';
+    less.addEventListener('click', () => {
+      listShown.set(key, LIST_BASE);
       renderSessionList(listEl, sessions, key);
     });
-    listEl.appendChild(btn);
+    foot.appendChild(less);
   }
+  if (foot.childElementCount) listEl.appendChild(foot);
 }
 
 /* ---------- 会话运行状态标识（运行中 / 已完成 / 报错） ---------- */
