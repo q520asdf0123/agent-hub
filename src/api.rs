@@ -93,10 +93,48 @@ pub async fn skills(Query(q): Query<SkillsQuery>) -> Response {
 pub struct SageReq {
     pub prompt: String,
     pub agent: Option<String>,
+    /// 本任务此前已失败过的 agent（ExecutionState.failed_agents，触发失败重路由）
+    pub failed: Option<Vec<String>>,
 }
 
 pub async fn sage_route(Json(body): Json<SageReq>) -> Response {
-    match crate::sage::route(&body.prompt, body.agent.as_deref().unwrap_or("claude")).await {
+    let failed = body.failed.unwrap_or_default();
+    match crate::sage::route(
+        &body.prompt,
+        body.agent.as_deref().unwrap_or("claude"),
+        &failed,
+    )
+    .await
+    {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+// ---------- POST /api/sage/outcome（执行结果回喂，驱动 SAGE 在线学习） ----------
+
+#[derive(Deserialize)]
+pub struct SageOutcomeReq {
+    pub decision_blob: serde_json::Value,
+    /// 0.0 ~ 1.0
+    pub success: f64,
+    pub actual_cost: Option<f64>,
+    pub actual_latency_ms: Option<f64>,
+}
+
+pub async fn sage_outcome(Json(body): Json<SageOutcomeReq>) -> Response {
+    match crate::sage::outcome(
+        body.decision_blob,
+        body.success,
+        body.actual_cost,
+        body.actual_latency_ms,
+    )
+    .await
+    {
         Ok(v) => Json(v).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

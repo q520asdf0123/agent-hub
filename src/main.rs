@@ -40,6 +40,7 @@ async fn main() {
         .route("/api/runs", get(api::runs_list))
         .route("/api/stop", post(api::stop_run))
         .route("/api/sage", post(api::sage_route))
+        .route("/api/sage/outcome", post(api::sage_outcome))
         .route("/api/file", get(api::file))
         .route("/api/open", post(api::open_path))
         .route("/api/filestat", post(api::filestat))

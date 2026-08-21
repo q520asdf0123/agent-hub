@@ -48,8 +48,8 @@ const I18N_EN = {
   '执行了操作': 'Performed actions', '⚡ 快速': '⚡ Fast', '⚡ 快速·开': '⚡ Fast · on',
   '🧭 智能路由': '🧭 Smart routing', '🧭 智能路由·开': '🧭 Routing · on', '🧭 路由中…': '🧭 Routing…',
   '🧭 SAGE 路由': '🧭 SAGE routing', '继续当前': 'Stay', '移交': 'Handoff', '协作': 'Collaborate',
-  '需求推断：': 'Inferred needs: ', '协作建议：完成后可用 ': 'Suggestion: review afterwards with ',
-  ' 复查': '', '成功率 ': 'Success ', ' · 覆盖 ': ' · Coverage ', ' · 效用 ': ' · Utility ',
+  '需求推断：': 'Inferred needs: ', '协作：完成后由 ': 'Collaborate: auto-review afterwards by ',
+  ' 自动复查': '', '成功率 ': 'Success ', ' · 覆盖 ': ' · Coverage ', ' · 效用 ': ' · Utility ',
   '点击查看差异 · 右键更多操作': 'Click for diff · right-click for more', '缓存': 'Cache', '上下文': 'Context', '点击放大': 'Click to zoom',
   '刚刚': 'just now', '跟随浏览器': 'Follow browser', '选择项目…': 'Pick a project…',
   '移除图片': 'Remove image', '＋ 导入项目…': '+ Import project…',
@@ -584,6 +584,7 @@ const state = {
   attachments: [],        // 输入框图片附件 [{path, name}]（已存服务端临时目录）
   agentFilter: localStorage.getItem('ah-agent-filter') || '', // ''=全部 | claude | codex
   sageOn: localStorage.getItem('ah-sage') === '1',            // SAGE 智能路由开关
+  sageFailed: null,       // 失败重路由记忆 {task, agents:[]}（成功后清空）
   runsIndex: {},          // session_id → {running, ok, error}（侧栏状态标识）
   modelsInfo: null,       // /api/models 解析结果（默认模型/思考强度展示用）
 };
@@ -2643,8 +2644,8 @@ function showToast(msg) {
 /** SAGE 决策卡片（折叠，标题展示模式与执行者） */
 function sageCard(d) {
   const MODE_CN = { self: '继续当前', handoff: '移交', collaborate: '协作' };
-  // 移交时默认展开，让「去了哪、为什么」一眼可见
-  const card = el('div', 'card sage' + (d.mode === 'handoff' ? ' open' : ''));
+  // 移交/协作时默认展开，让「去了哪、为什么」一眼可见
+  const card = el('div', 'card sage' + (d.mode === 'self' ? '' : ' open'));
   const head = el('div', 'card-head');
   head.appendChild(el('span', 'card-caret', '▸'));
   const who = AGENTS[d.primary] ? AGENTS[d.primary].label : d.primary;
@@ -2659,7 +2660,7 @@ function sageCard(d) {
   if (reqs) lines.push(t('需求推断：') + reqs);
   if (d.partner) {
     const p = AGENTS[d.partner] ? AGENTS[d.partner].label : d.partner;
-    lines.push(t('协作建议：完成后可用 ') + p + t(' 复查'));
+    lines.push(t('协作：完成后由 ') + p + t(' 自动复查'));
   }
   lines.push(
     t('成功率 ') + d.success_probability + t(' · 覆盖 ') + d.coverage + t(' · 效用 ') + d.utility
@@ -2759,7 +2760,10 @@ async function onSend() {
     const btn = $('#sage-btn');
     btn.textContent = t('🧭 路由中…');
     try {
-      sageInfo = await api.post('/api/sage', { prompt: text, agent: state.agent });
+      // 失败重路由：同一任务重发时，把上次失败的执行者交给 ExecutionState.failed_agents
+      const failed =
+        state.sageFailed && state.sageFailed.task === text ? state.sageFailed.agents : [];
+      sageInfo = await api.post('/api/sage', { prompt: text, agent: state.agent, failed });
       if (
         sageInfo &&
         sageInfo.primary &&
@@ -2774,8 +2778,16 @@ async function onSend() {
           setAgentFilter('');
           extra = CUR_LANG === 'en' ? ' (sidebar filter reset to All)' : '（侧栏过滤已切回全部）';
         }
+        const partner =
+          sageInfo.partner && AGENTS[sageInfo.partner] ? AGENTS[sageInfo.partner].label : null;
         showToast(
-          (CUR_LANG === 'en' ? '🧭 Routed to ' + who : '🧭 已移交给 ' + who + ' 执行') + extra
+          (partner
+            ? CUR_LANG === 'en'
+              ? '🧭 Collaborate: ' + who + ' runs, ' + partner + ' reviews'
+              : '🧭 协作：' + who + ' 执行，' + partner + ' 复查'
+            : CUR_LANG === 'en'
+              ? '🧭 Routed to ' + who
+              : '🧭 已移交给 ' + who + ' 执行') + extra
         );
       }
     } catch (_) {
@@ -2842,11 +2854,15 @@ async function onSend() {
       : null;
   let primaryFinal = '';
   let primaryOk = false;
+  let primaryAborted = false;
+  let primaryMs = null;
+  let primaryOut = 0;
   try {
     await streamChat(req, handleEvent, ac.signal);
   } catch (err) {
     if (stream) {
       if (err && err.name === 'AbortError') {
+        primaryAborted = true;
         stream.ctx.bodyEl.appendChild(el('div', 'status-line', t('↪ 已断开查看，任务在后台继续')));
       } else {
         stream.ctx.bodyEl.appendChild(el('div', 'error-bar', t('请求失败：') + ((err && err.message) || err)));
@@ -2856,6 +2872,8 @@ async function onSend() {
     if (stream) {
       primaryFinal = stream.finalText || '';
       primaryOk = !!stream.doneOk;
+      primaryMs = Date.now() - stream.startedAt;
+      primaryOut = (stream.usage && stream.usage.output) || 0;
     }
     finalizeStream();
     state.streaming = false;
@@ -2868,6 +2886,27 @@ async function onSend() {
     // 会话文件已落盘，刷新侧栏（列表与项目计数）
     loadConvs();
     loadProjects();
+  }
+  // SAGE 证据回喂：真实成败/耗时/成本交还路由器学习（断开查看≠失败，不回喂）
+  if (sageInfo && sageInfo.decision_blob && !primaryAborted) {
+    api
+      .post('/api/sage/outcome', {
+        decision_blob: sageInfo.decision_blob,
+        success: primaryOk ? 1 : 0,
+        actual_cost: Math.min(1, primaryOut / 100000),
+        actual_latency_ms: primaryMs,
+      })
+      .catch(() => {});
+    if (primaryOk) {
+      state.sageFailed = null;
+    } else {
+      const f =
+        state.sageFailed && state.sageFailed.task === text
+          ? state.sageFailed
+          : { task: text, agents: [] };
+      if (!f.agents.includes(req.agent)) f.agents.push(req.agent);
+      state.sageFailed = f;
+    }
   }
   // 主执行成功且有搭档 → 自动协作复查（用户仍停留在本会话时）
   if (collab && primaryOk && state.session) {

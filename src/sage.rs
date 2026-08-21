@@ -38,7 +38,34 @@ fn find_python() -> Option<String> {
     None
 }
 
-pub async fn route(prompt: &str, incumbent: &str) -> Result<Value, String> {
+pub async fn route(prompt: &str, incumbent: &str, failed: &[String]) -> Result<Value, String> {
+    call(json!({
+        "cmd": "route",
+        "prompt": prompt,
+        "incumbent": incumbent,
+        "failed": failed,
+    }))
+    .await
+}
+
+/// 执行结束后回喂证据（record_outcome），驱动 SAGE 的在线学习闭环。
+pub async fn outcome(
+    decision_blob: Value,
+    success: f64,
+    actual_cost: Option<f64>,
+    actual_latency_ms: Option<f64>,
+) -> Result<Value, String> {
+    call(json!({
+        "cmd": "outcome",
+        "decision_blob": decision_blob,
+        "success": success,
+        "actual_cost": actual_cost,
+        "actual_latency_ms": actual_latency_ms,
+    }))
+    .await
+}
+
+async fn call(payload: Value) -> Result<Value, String> {
     let dir = ensure_scripts()?;
     static PY: OnceLock<Option<String>> = OnceLock::new();
     let py = PY
@@ -55,7 +82,7 @@ pub async fn route(prompt: &str, incumbent: &str) -> Result<Value, String> {
         .spawn()
         .map_err(|e| format!("启动 python 失败: {e}"))?;
 
-    let payload = json!({ "prompt": prompt, "incumbent": incumbent }).to_string();
+    let payload = payload.to_string();
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(payload.as_bytes()).await;
         let _ = stdin.shutdown().await;
