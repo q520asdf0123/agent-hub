@@ -570,7 +570,14 @@ const state = {
   streaming: false,
   abort: null,            // AbortController
   activeKey: null,        // 侧栏高亮 "agent:id"
-  expanded: new Set(),    // 已展开的项目路径
+  expanded: (() => {
+    // 已展开的项目路径（持久化，重开页面保持）
+    try {
+      return new Set(JSON.parse(localStorage.getItem('ah-expanded') || '[]'));
+    } catch (_) {
+      return new Set();
+    }
+  })(),
   searchSeq: 0,           // 搜索请求竞态序号
   skillsCache: {},        // project 规范化路径 → /api/skills 结果
   modelsPromise: null,    // /api/models 结果缓存
@@ -929,9 +936,14 @@ function renderProjects() {
   }
 }
 
+function saveExpanded() {
+  localStorage.setItem('ah-expanded', JSON.stringify([...state.expanded]));
+}
+
 function toggleProject(path) {
   if (state.expanded.has(path)) state.expanded.delete(path);
   else state.expanded.add(path);
+  saveExpanded();
   renderProjects();
 }
 
@@ -1141,8 +1153,18 @@ async function onSearch() {
 
 /* ---------- 分组收缩与「显示全部」 ---------- */
 
-/** 各列表当前显示条数（key：'convs' 或项目路径）；分组收缩状态持久化 localStorage */
-const listShown = new Map();
+/** 各列表当前显示条数（key：'convs' 或项目路径），持久化重开保持 */
+const listShown = (() => {
+  try {
+    return new Map(Object.entries(JSON.parse(localStorage.getItem('ah-list-shown') || '{}')));
+  } catch (_) {
+    return new Map();
+  }
+})();
+
+function saveListShown() {
+  localStorage.setItem('ah-list-shown', JSON.stringify(Object.fromEntries(listShown)));
+}
 const LIST_BASE = 6;
 const LIST_STEP = 20;
 
@@ -1225,6 +1247,7 @@ function renderSessionList(listEl, sessions, key, animateFrom) {
     more.type = 'button';
     more.addEventListener('click', () => {
       listShown.set(key, shown + LIST_STEP);
+      saveListShown();
       renderSessionList(listEl, sessions, key, shown);
     });
     foot.appendChild(more);
@@ -1234,6 +1257,7 @@ function renderSessionList(listEl, sessions, key, animateFrom) {
     less.type = 'button';
     less.addEventListener('click', () => {
       listShown.set(key, LIST_BASE);
+      saveListShown();
       renderSessionList(listEl, sessions, key);
     });
     foot.appendChild(less);
@@ -1296,6 +1320,7 @@ function expandProjectFor(sess) {
   const hit = state.projects.find((p) => clientNorm(p.path) === clientNorm(sess.project));
   if (hit && !state.expanded.has(hit.path)) {
     state.expanded.add(hit.path);
+    saveExpanded();
     renderProjects();
   }
 }
