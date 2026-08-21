@@ -50,7 +50,7 @@ const I18N_EN = {
   '🧭 SAGE 路由': '🧭 SAGE routing', '继续当前': 'Stay', '移交': 'Handoff', '协作': 'Collaborate',
   '需求推断：': 'Inferred needs: ', '协作建议：完成后可用 ': 'Suggestion: review afterwards with ',
   ' 复查': '', '成功率 ': 'Success ', ' · 覆盖 ': ' · Coverage ', ' · 效用 ': ' · Utility ',
-  '点击查看差异 · 右键更多操作': 'Click for diff · right-click for more', '点击放大': 'Click to zoom',
+  '点击查看差异 · 右键更多操作': 'Click for diff · right-click for more', '缓存': 'Cache', '点击放大': 'Click to zoom',
   '刚刚': 'just now', '跟随浏览器': 'Follow browser', '选择项目…': 'Pick a project…',
   '移除图片': 'Remove image', '＋ 导入项目…': '+ Import project…',
   'Enter 发送 · Shift+Enter 换行': 'Enter to send · Shift+Enter for newline',
@@ -2158,6 +2158,8 @@ async function openSession(s) {
   setActiveRow(s.agent + ':' + s.id);
   showChat();
   setChatHead(state.session);
+  const ub = $('#usage-bar');
+  if (ub) ub.classList.add('hidden'); // 历史会话无实时用量数据
   promptInput.placeholder = t('继续这个会话…');
   hideComposerError();
   chatMsgs.textContent = '';
@@ -2209,8 +2211,35 @@ function beginAssistant() {
     cur: null,
     stderrPre: null,
     startedAt: Date.now(),
+    usage: { input: 0, output: 0, cr: 0, cw: 0, has: false },
+    usageTimer: setInterval(renderUsageBar, 1000),
   };
   bodyEl.appendChild(cursorEl);
+}
+
+/* ---------- 用量条：总 token / 速度 / 缓存命中率 ---------- */
+
+function fmtTok(n) {
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+  return String(n);
+}
+
+function renderUsageBar() {
+  const bar = $('#usage-bar');
+  if (!bar || !stream || !stream.usage.has) return;
+  const u = stream.usage;
+  const elapsed = Math.max(1, (Date.now() - stream.startedAt) / 1000);
+  const speed = u.output / elapsed;
+  const den = u.input + u.cr + u.cw;
+  const hit = den > 0 ? Math.round((u.cr / den) * 100) : 0;
+  bar.textContent =
+    '↑ ' + fmtTok(u.input + u.cr + u.cw) + ' · ↓ ' + fmtTok(u.output) +
+    ' · ' + speed.toFixed(1) + ' tok/s · ' + t('缓存') + ' ' + hit + '%';
+  bar.title =
+    'input ' + (u.input) + ' + cache_read ' + u.cr + ' + cache_write ' + u.cw +
+    '\noutput ' + u.output;
+  bar.classList.remove('hidden');
 }
 
 /** 耗时格式化：45 秒 / 3分15秒 / 1小时02分 */
@@ -2232,7 +2261,11 @@ function finalizeCur() {
 function finalizeStream() {
   finalizeCur();
   cursorEl.remove();
-  if (stream) stream.ctx.bodyEl.classList.remove('streaming');
+  if (stream) {
+    stream.ctx.bodyEl.classList.remove('streaming');
+    if (stream.usageTimer) clearInterval(stream.usageTimer);
+    renderUsageBar(); // 定格最终数值
+  }
   stream = null;
 }
 
@@ -2341,6 +2374,23 @@ function handleEvent(ev) {
     case 'file_edit':
       if (ev.path) stream.ctx.fileEdits.add(ev.path);
       break;
+    case 'usage': {
+      const u = stream.usage;
+      if (ev.mode === 'set') {
+        u.input = ev.input || 0;
+        u.output = ev.output || 0;
+        u.cr = ev.cache_read || 0;
+        u.cw = ev.cache_write || 0;
+      } else {
+        u.input += ev.input || 0;
+        u.output += ev.output || 0;
+        u.cr += ev.cache_read || 0;
+        u.cw += ev.cache_write || 0;
+      }
+      u.has = true;
+      renderUsageBar();
+      break;
+    }
     case 'status':
       finalizeCur();
       stream.ctx.bodyEl.appendChild(el('div', 'status-line', '⏳ ' + (ev.text || '')));

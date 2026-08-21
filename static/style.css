@@ -1445,3 +1445,14 @@ button { font-family: inherit; }
   to { opacity: 1; transform: none; }
 }
 .srow.row-in { animation: row-in 0.2s ease both; }
+
+/* ---------- 会话头部用量条 ---------- */
+
+.usage-bar {
+  margin-left: auto;
+  margin-right: 14px;
+  flex-shrink: 0;
+  font: 12px Consolas, "Cascadia Mono", monospace;
+  color: var(--dim);
+  white-space: nowrap;
+}

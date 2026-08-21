@@ -616,6 +616,12 @@ fn claude_map_line(line: &str, st: &mut MapState) -> Vec<Value> {
                     }
                 }
             }
+            // 每条 assistant 消息的用量增量（result 事件会以权威值覆盖）
+            if let Some(u) = v.pointer("/message/usage") {
+                if let Some(ev) = usage_event("add", u) {
+                    out.push(ev);
+                }
+            }
         }
         "user" => {
             if let Some(content) = v.pointer("/message/content").and_then(Value::as_array) {
@@ -633,6 +639,11 @@ fn claude_map_line(line: &str, st: &mut MapState) -> Vec<Value> {
         "result" => {
             if let Some(sid) = v.get("session_id").and_then(Value::as_str) {
                 st.session_id = Some(sid.to_string());
+            }
+            if let Some(u) = v.get("usage") {
+                if let Some(ev) = usage_event("set", u) {
+                    out.push(ev);
+                }
             }
             if v.get("is_error").and_then(Value::as_bool).unwrap_or(false) {
                 st.is_error = true;
@@ -717,6 +728,25 @@ fn codex_map_line(line: &str, st: &mut MapState) -> Vec<Value> {
     }
     if (etype.contains("turn") && etype.contains("started")) || etype == "task_started" {
         out.push(json!({"t": "status", "text": "运行中"}));
+        return out;
+    }
+    // codex 用量：token_count（info.total_token_usage）或 turn.completed 的 usage
+    if etype == "token_count" {
+        let u = ev
+            .pointer("/info/total_token_usage")
+            .or_else(|| ev.get("info"))
+            .unwrap_or(ev);
+        if let Some(e) = usage_event("set", u) {
+            out.push(e);
+        }
+        return out;
+    }
+    if etype.contains("turn") && etype.contains("completed") {
+        if let Some(u) = ev.get("usage") {
+            if let Some(e) = usage_event("set", u) {
+                out.push(e);
+            }
+        }
         return out;
     }
     // item 类：item.started / item.updated / item.completed（及 item_completed 变体）。
@@ -878,6 +908,27 @@ fn codex_map_item(item: &Value, st: &mut MapState) -> Vec<Value> {
         _ => {}
     }
     out
+}
+
+/// 统一 usage 事件：兼容 claude（cache_read/creation_input_tokens）与
+/// codex（cached_input_tokens）字段名。mode=add 增量累计 / set 权威覆盖。
+fn usage_event(mode: &str, u: &Value) -> Option<Value> {
+    let g = |k: &str| u.get(k).and_then(Value::as_i64).unwrap_or(0);
+    let input = g("input_tokens");
+    let output = g("output_tokens");
+    let cache_read = g("cache_read_input_tokens") + g("cached_input_tokens");
+    let cache_write = g("cache_creation_input_tokens") + g("cache_write_input_tokens");
+    if input == 0 && output == 0 && cache_read == 0 && cache_write == 0 {
+        return None;
+    }
+    Some(json!({
+        "t": "usage",
+        "mode": mode,
+        "input": input,
+        "output": output,
+        "cache_read": cache_read,
+        "cache_write": cache_write,
+    }))
 }
 
 /// codex file_change item 的 changes（数组或对象）里提取文件路径。
