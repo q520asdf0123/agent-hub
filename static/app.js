@@ -2349,7 +2349,9 @@ function renderUsageBar() {
   let tip =
     'input ' + u.input + ' + cache_read ' + u.cr + ' + cache_write ' + u.cw +
     '\noutput ' + u.output;
-  const winEff = win > 0 ? win : (stream.base && /\[1m\]/i.test(stream.base.model) ? 1000000 : 0);
+  const win0 = u.window || contextWindowFor();
+  const winEff =
+    win0 > 0 ? win0 : stream.base && /\[1m\]/i.test(stream.base.model) ? 1000000 : 0;
   if (winEff > 0 && u.ctx > 0) {
     const used = Math.min(100, Math.round((u.ctx / winEff) * 100));
     text += ' · ' + t('上下文') + ' ' + used + '%';
@@ -2516,7 +2518,9 @@ function handleEvent(ev) {
       if (ev.context) u.ctx = ev.context;
       if (ev.window) u.window = ev.window;
       u.has = true;
-      renderUsageBar();
+      try {
+        renderUsageBar(); // 展示层异常绝不打断流式读取
+      } catch (_) { /* 忽略 */ }
       break;
     }
     case 'status':
