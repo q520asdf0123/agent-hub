@@ -1456,3 +1456,27 @@ button { font-family: inherit; }
   color: var(--dim);
   white-space: nowrap;
 }
+
+/* ---------- 顶部 toast 通知 ---------- */
+
+.toast {
+  position: fixed;
+  top: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 200;
+  background: var(--card);
+  border: 1px solid var(--accent2);
+  color: var(--fg);
+  border-radius: 10px;
+  padding: 9px 18px;
+  font-size: 13.5px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+  animation: toast-in 0.25s ease;
+  transition: opacity 0.3s, transform 0.3s;
+}
+.toast.gone { opacity: 0; transform: translateX(-50%) translateY(-8px); }
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(-10px); }
+  to { opacity: 1; transform: translateX(-50%); }
+}

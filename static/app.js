@@ -1494,6 +1494,7 @@ function getModels() {
 
 function showHero() {
   state.session = null;
+  state.histUsage = null;
   $('#view-chat').classList.add('hidden');
   $('#view-hero').classList.remove('hidden');
   $('#hero-slot').appendChild(composerEl);
@@ -2195,6 +2196,7 @@ async function openSession(s) {
     if (!state.session || state.session.id !== s.id || state.session.agent !== s.agent) return; // 已切走
     chatMsgs.textContent = '';
     renderTranscript(chatMsgs, t);
+    state.histUsage = t.usage || null; // 供续聊/重连作为用量基线
     if (t.usage) renderUsageFromHistory(t.usage, s.agent); // 已完成会话的整场用量
     if (t.title) {
       state.session.title = t.title;
@@ -2238,6 +2240,21 @@ function beginAssistant() {
     stderrPre: null,
     startedAt: Date.now(),
     usage: { input: 0, output: 0, cr: 0, cw: 0, ctx: 0, window: 0, has: false },
+    finalText: '',
+    doneOk: false,
+    // 续聊/重连：以历史用量为基线，实时数值 = 基线 + 本轮增量
+    base: state.histUsage
+      ? {
+          input: state.histUsage.input || 0,
+          output: state.histUsage.output || 0,
+          cr: state.histUsage.cache_read || 0,
+          cw: state.histUsage.cache_write || 0,
+          ctx: state.histUsage.context || 0,
+          window: state.histUsage.window || 0,
+          firstTs: state.histUsage.first_ts ? Date.parse(state.histUsage.first_ts) : null,
+          model: state.histUsage.model || '',
+        }
+      : null,
     usageTimer: setInterval(renderUsageBar, 1000),
   };
   bodyEl.appendChild(cursorEl);
@@ -2308,9 +2325,21 @@ function renderUsageFromHistory(u, agent) {
 
 function renderUsageBar() {
   const bar = $('#usage-bar');
-  if (!bar || !stream || !stream.usage.has) return;
-  const u = stream.usage;
-  const elapsed = Math.max(1, (Date.now() - stream.startedAt) / 1000);
+  if (!bar || !stream) return;
+  const b = stream.base;
+  if (!stream.usage.has && !b) return;
+  // 合并基线（历史）与本轮增量
+  const raw = stream.usage;
+  const u = {
+    input: raw.input + (b ? b.input : 0),
+    output: raw.output + (b ? b.output : 0),
+    cr: raw.cr + (b ? b.cr : 0),
+    cw: raw.cw + (b ? b.cw : 0),
+    ctx: raw.ctx || (b ? b.ctx : 0),
+    window: raw.window || (b ? b.window : 0),
+  };
+  const t0 = b && b.firstTs ? b.firstTs : stream.startedAt;
+  const elapsed = Math.max(1, (Date.now() - t0) / 1000);
   const speed = u.output / elapsed;
   const den = u.input + u.cr + u.cw;
   const hit = den > 0 ? Math.round((u.cr / den) * 100) : 0;
@@ -2320,17 +2349,17 @@ function renderUsageBar() {
   let tip =
     'input ' + u.input + ' + cache_read ' + u.cr + ' + cache_write ' + u.cw +
     '\noutput ' + u.output;
-  const win = contextWindowFor();
-  if (win > 0 && u.ctx > 0) {
-    const used = Math.min(100, Math.round((u.ctx / win) * 100));
+  const winEff = win > 0 ? win : (stream.base && /\[1m\]/i.test(stream.base.model) ? 1000000 : 0);
+  if (winEff > 0 && u.ctx > 0) {
+    const used = Math.min(100, Math.round((u.ctx / winEff) * 100));
     text += ' · ' + t('上下文') + ' ' + used + '%';
     tip +=
       '\n' +
       (CUR_LANG === 'en'
         ? 'Context window: ' + used + '% used (' + (100 - used) + '% left)\n' +
-          fmtTok(u.ctx) + ' of ' + fmtTok(win) + ' tokens'
+          fmtTok(u.ctx) + ' of ' + fmtTok(winEff) + ' tokens'
         : '上下文窗口：' + used + '% 已用（剩余 ' + (100 - used) + '%）\n已用 ' +
-          fmtTok(u.ctx) + '，共 ' + fmtTok(win));
+          fmtTok(u.ctx) + '，共 ' + fmtTok(winEff));
   }
   bar.textContent = text;
   bar.title = tip;
@@ -2434,6 +2463,7 @@ function handleEvent(ev) {
         b.raw += ev.text || '';
         renderMarkdown(b.el, b.raw);
         placeCursorIn(b.el);
+        stream.finalText = (stream.finalText + ev.text).slice(-12000);
       }
       break;
     case 'text': {
@@ -2443,6 +2473,7 @@ function handleEvent(ev) {
       renderMarkdown(d, ev.text || '');
       stream.ctx.bodyEl.appendChild(d);
       stream.ctx.bodyEl.appendChild(cursorEl);
+      stream.finalText = (stream.finalText + '\n' + (ev.text || '')).slice(-12000);
       break;
     }
     case 'thinking':
@@ -2501,6 +2532,7 @@ function handleEvent(ev) {
         state.session.id = ev.session_id;
         prependConvRow();
       }
+      stream.doneOk = !!ev.ok;
       finalizeCur();
       flushFilesCard(stream.ctx); // 汇总本轮编辑的文件卡片
       if (!ev.ok) {
@@ -2589,10 +2621,26 @@ function setSendButton(streaming) {
   $('#stop-icon').classList.toggle('hidden', !streaming);
 }
 
+/* ---------- 顶部 toast 通知 ---------- */
+
+let toastEl = null;
+
+function showToast(msg) {
+  if (toastEl) toastEl.remove();
+  toastEl = el('div', 'toast', msg);
+  document.body.appendChild(toastEl);
+  const cur = toastEl;
+  setTimeout(() => {
+    cur.classList.add('gone');
+    setTimeout(() => cur.remove(), 350);
+  }, 3200);
+}
+
 /** SAGE 决策卡片（折叠，标题展示模式与执行者） */
 function sageCard(d) {
   const MODE_CN = { self: '继续当前', handoff: '移交', collaborate: '协作' };
-  const card = el('div', 'card sage');
+  // 移交时默认展开，让「去了哪、为什么」一眼可见
+  const card = el('div', 'card sage' + (d.mode === 'handoff' ? ' open' : ''));
   const head = el('div', 'card-head');
   head.appendChild(el('span', 'card-caret', '▸'));
   const who = AGENTS[d.primary] ? AGENTS[d.primary].label : d.primary;
@@ -2622,6 +2670,79 @@ function sageCard(d) {
   return card;
 }
 
+/** 真协作：主执行者完成后，搭档 agent 只读复查其结论并流式追加 */
+async function runCollabReview(collab, primaryText) {
+  if (!state.session || !primaryText.trim()) return;
+  const partnerLabel = AGENTS[collab.partner].label;
+  const primaryLabel = AGENTS[state.session.agent]
+    ? AGENTS[state.session.agent].label
+    : state.session.agent;
+  chatMsgs.appendChild(
+    renderDivider(
+      (CUR_LANG === 'en' ? '🤝 Collaborative review · ' : '🤝 协作复查 · ') + partnerLabel
+    )
+  );
+  scrollChat();
+  const savedHist = state.histUsage;
+  state.histUsage = null; // 复查是独立新会话，不继承用量基线
+  beginAssistant();
+  state.histUsage = savedHist;
+  const reviewPrompt =
+    '【协作复查】另一位 agent（' + primaryLabel + '）刚完成了以下任务，请你只读复查其结论：' +
+    '指出可能的错误、遗漏与风险，并给出简明改进建议。不要修改任何文件或数据。\n\n' +
+    '原任务：\n' + collab.task + '\n\n' + primaryLabel + ' 的输出：\n' + primaryText;
+  const req = {
+    agent: collab.partner,
+    project: state.session.project,
+    prompt: reviewPrompt,
+    session_id: null,
+    model: null,
+    permission: collab.partner === 'codex' ? 'read-only' : 'default',
+    effort: null,
+    fast: false,
+  };
+  state.streaming = true;
+  state.runId = null;
+  setSendButton(true);
+  const ac = new AbortController();
+  state.abort = ac;
+  // 守卫：复查是独立会话，不接管当前会话 id
+  const guard = (ev) => {
+    if (!ev) return;
+    if (ev.t === 'init') return;
+    if (ev.t === 'done') {
+      if (stream) {
+        flushFilesCard(stream.ctx);
+        if (!ev.ok) {
+          stream.ctx.bodyEl.appendChild(
+            el('div', 'error-bar', ev.error || t('运行失败（无错误信息）'))
+          );
+        } else if (Date.now() - stream.startedAt > 3000) {
+          stream.ctx.bodyEl.appendChild(
+            el('div', 'done-line', t('已处理') + ' ' + fmtDuration(Date.now() - stream.startedAt))
+          );
+        }
+      }
+      return;
+    }
+    handleEvent(ev);
+  };
+  try {
+    await streamChat(req, guard, ac.signal);
+  } catch (e) {
+    if (stream && e && e.name !== 'AbortError') {
+      stream.ctx.bodyEl.appendChild(el('div', 'error-bar', t('请求失败：') + (e.message || e)));
+    }
+  } finally {
+    finalizeStream();
+    state.streaming = false;
+    state.abort = null;
+    state.runId = null;
+    setSendButton(false);
+    loadConvs(); // 复查会话已落盘，出现在侧栏
+  }
+}
+
 async function onSend() {
   if (state.streaming) return;
   const text = promptInput.value.trim();
@@ -2642,6 +2763,16 @@ async function onSend() {
         sageInfo.primary !== state.agent
       ) {
         setAgent(sageInfo.primary);
+        const who = AGENTS[sageInfo.primary].label;
+        // 侧栏过滤会藏住被移交的新会话 → 自动放行到「全部」
+        let extra = '';
+        if (state.agentFilter && state.agentFilter !== sageInfo.primary) {
+          setAgentFilter('');
+          extra = CUR_LANG === 'en' ? ' (sidebar filter reset to All)' : '（侧栏过滤已切回全部）';
+        }
+        showToast(
+          (CUR_LANG === 'en' ? '🧭 Routed to ' + who : '🧭 已移交给 ' + who + ' 执行') + extra
+        );
       }
     } catch (_) {
       sageInfo = null; // 路由失败回退当前 agent，不阻塞发送
@@ -2700,6 +2831,13 @@ async function onSend() {
   setSendButton(true);
   const ac = new AbortController();
   state.abort = ac;
+  // 协作复查条件：路由给出了搭档（新会话首轮才有 sageInfo）
+  const collab =
+    sageInfo && sageInfo.partner && AGENTS[sageInfo.partner]
+      ? { partner: sageInfo.partner, task: text }
+      : null;
+  let primaryFinal = '';
+  let primaryOk = false;
   try {
     await streamChat(req, handleEvent, ac.signal);
   } catch (err) {
@@ -2711,6 +2849,10 @@ async function onSend() {
       }
     }
   } finally {
+    if (stream) {
+      primaryFinal = stream.finalText || '';
+      primaryOk = !!stream.doneOk;
+    }
     finalizeStream();
     state.streaming = false;
     state.abort = null;
@@ -2722,6 +2864,10 @@ async function onSend() {
     // 会话文件已落盘，刷新侧栏（列表与项目计数）
     loadConvs();
     loadProjects();
+  }
+  // 主执行成功且有搭档 → 自动协作复查（用户仍停留在本会话时）
+  if (collab && primaryOk && state.session) {
+    await runCollabReview(collab, primaryFinal);
   }
 }
 
