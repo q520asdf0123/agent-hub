@@ -450,6 +450,7 @@ const state = {
   agentFilter: localStorage.getItem('ah-agent-filter') || '', // ''=全部 | claude | codex
   sageOn: localStorage.getItem('ah-sage') === '1',            // SAGE 智能路由开关
   runsIndex: {},          // session_id → {running, ok, error}（侧栏状态标识）
+  modelsInfo: null,       // /api/models 解析结果（默认模型/思考强度展示用）
 };
 
 /* ---------- DOM 引用 ---------- */
@@ -1218,8 +1219,11 @@ const EFFORT_LABELS = {
 };
 
 function effortLabel() {
-  if (state.effort === null) return '思考·默认 ⌄';
-  return '思考·' + (EFFORT_LABELS[state.effort] || state.effort) + ' ⌄';
+  if (state.effort !== null) return '思考·' + (EFFORT_LABELS[state.effort] || state.effort) + ' ⌄';
+  // 默认态直接展示实际默认思考强度
+  const info = state.modelsInfo && state.modelsInfo[currentAgent()];
+  const de = info && info.default_effort;
+  return '思考·' + (de ? EFFORT_LABELS[de] || de : '默认') + ' ⌄';
 }
 
 /** 会话一旦有 id（历史打开或新会话已落盘），agent 即锁定不可切换 */
@@ -1285,7 +1289,10 @@ function permLabel() {
 }
 
 function modelLabel() {
-  return (state.model === null ? '默认模型' : state.model) + ' ⌄';
+  if (state.model !== null) return state.model + ' ⌄';
+  // 默认态直接展示实际默认模型名
+  const info = state.modelsInfo && state.modelsInfo[currentAgent()];
+  return (info && info.default ? info.default : '默认模型') + ' ⌄';
 }
 
 /** /api/models 结果缓存（Promise，失败重试） */
@@ -2730,6 +2737,13 @@ function init() {
   checkActiveRuns();
   pollRuns();
   setInterval(pollRuns, 5000); // 侧栏运行状态标识轮询
+  // 预取模型信息：让「默认」态直接展示实际默认模型与思考强度
+  getModels()
+    .then((all) => {
+      state.modelsInfo = all;
+      syncAgentUI();
+    })
+    .catch(() => {});
 }
 
 init();
