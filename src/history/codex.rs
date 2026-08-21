@@ -582,6 +582,18 @@ fn handle_event_msg(messages: &mut Vec<ChatMessage>, payload: &Value, ts: Option
             }
             push_text_dedup(messages, "assistant", ts, text.to_string());
         }
+        Some("turn_aborted") => {
+            // 明确标出中断点，与正常结束区分
+            messages.push(crate::types::ChatMessage {
+                role: "system".to_string(),
+                ts,
+                blocks: vec![Block {
+                    kind: "divider".to_string(),
+                    text: "⚠ 回合被中止（进程被终止，任务未完成）".to_string(),
+                    name: None,
+                }],
+            });
+        }
         Some("item_completed") => {
             let Some(item) = payload.get("item") else {
                 return;
