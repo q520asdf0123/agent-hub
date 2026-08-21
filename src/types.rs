@@ -103,6 +103,8 @@ pub struct AgentModels {
     pub efforts: Vec<String>,
     /// 配置文件里的全局默认思考等级
     pub default_effort: Option<String>,
+    /// 模型上下文窗口（token 数，能探明时提供）
+    pub context_window: Option<i64>,
 }
 
 #[derive(Serialize, Clone, Debug)]

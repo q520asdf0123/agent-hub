@@ -69,6 +69,7 @@ fn claude_models() -> AgentModels {
             .map(String::from)
             .to_vec(),
         default_effort,
+        context_window: None, // 前端按模型名推断（[1m] → 1M，其余 200k）
     }
 }
 
@@ -78,6 +79,7 @@ const EFFORT_ORDER: [&str; 7] = ["minimal", "low", "medium", "high", "xhigh", "m
 fn codex_models() -> AgentModels {
     let mut default = None;
     let mut default_effort = None;
+    let mut context_window: Option<i64> = None;
     let mut models: Vec<String> = Vec::new();
     let mut effort_set: Vec<String> = Vec::new();
     let Some(h) = dirs::home_dir() else {
@@ -86,6 +88,7 @@ fn codex_models() -> AgentModels {
             models,
             efforts: Vec::new(),
             default_effort,
+            context_window: None,
         };
     };
     let codex = h.join(".codex");
@@ -102,6 +105,10 @@ fn codex_models() -> AgentModels {
                 catalog_path = Some(PathBuf::from(v));
             } else if let Some(v) = toml_str_value(t, "model_reasoning_effort") {
                 default_effort = Some(v);
+            } else if let Some(rest) = t.strip_prefix("model_context_window") {
+                if let Some(v) = rest.trim_start().strip_prefix('=') {
+                    context_window = v.trim().parse::<i64>().ok();
+                }
             }
         }
     }
@@ -155,6 +162,7 @@ fn codex_models() -> AgentModels {
         models,
         efforts,
         default_effort,
+        context_window,
     }
 }
 

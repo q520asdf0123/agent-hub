@@ -736,7 +736,21 @@ fn codex_map_line(line: &str, st: &mut MapState) -> Vec<Value> {
             .pointer("/info/total_token_usage")
             .or_else(|| ev.get("info"))
             .unwrap_or(ev);
-        if let Some(e) = usage_event("set", u) {
+        if let Some(mut e) = usage_event("set", u) {
+            // 上下文占用取最后一次请求的 prompt 规模（total 是全程累计，不代表上下文）
+            if let Some(last) = ev.pointer("/info/last_token_usage") {
+                let g = |k: &str| last.get(k).and_then(Value::as_i64).unwrap_or(0);
+                let ctx = g("input_tokens") + g("cached_input_tokens");
+                if ctx > 0 {
+                    e["context"] = json!(ctx);
+                }
+            }
+            if let Some(w) = ev
+                .pointer("/info/model_context_window")
+                .and_then(Value::as_i64)
+            {
+                e["window"] = json!(w);
+            }
             out.push(e);
         }
         return out;
@@ -928,6 +942,8 @@ fn usage_event(mode: &str, u: &Value) -> Option<Value> {
         "output": output,
         "cache_read": cache_read,
         "cache_write": cache_write,
+        // 本次调用的完整 prompt 规模 ≈ 当前上下文占用
+        "context": input + cache_read + cache_write,
     }))
 }
 

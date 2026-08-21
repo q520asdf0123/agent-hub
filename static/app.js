@@ -50,7 +50,7 @@ const I18N_EN = {
   '🧭 SAGE 路由': '🧭 SAGE routing', '继续当前': 'Stay', '移交': 'Handoff', '协作': 'Collaborate',
   '需求推断：': 'Inferred needs: ', '协作建议：完成后可用 ': 'Suggestion: review afterwards with ',
   ' 复查': '', '成功率 ': 'Success ', ' · 覆盖 ': ' · Coverage ', ' · 效用 ': ' · Utility ',
-  '点击查看差异 · 右键更多操作': 'Click for diff · right-click for more', '缓存': 'Cache', '点击放大': 'Click to zoom',
+  '点击查看差异 · 右键更多操作': 'Click for diff · right-click for more', '缓存': 'Cache', '上下文': 'Context', '点击放大': 'Click to zoom',
   '刚刚': 'just now', '跟随浏览器': 'Follow browser', '选择项目…': 'Pick a project…',
   '移除图片': 'Remove image', '＋ 导入项目…': '+ Import project…',
   'Enter 发送 · Shift+Enter 换行': 'Enter to send · Shift+Enter for newline',
@@ -2236,7 +2236,7 @@ function beginAssistant() {
     cur: null,
     stderrPre: null,
     startedAt: Date.now(),
-    usage: { input: 0, output: 0, cr: 0, cw: 0, has: false },
+    usage: { input: 0, output: 0, cr: 0, cw: 0, ctx: 0, window: 0, has: false },
     usageTimer: setInterval(renderUsageBar, 1000),
   };
   bodyEl.appendChild(cursorEl);
@@ -2250,6 +2250,17 @@ function fmtTok(n) {
   return String(n);
 }
 
+/** 上下文窗口大小：事件提供 > 模型发现 > 按模型名推断（[1m] → 1M，其余 200k） */
+function contextWindowFor() {
+  const u = stream && stream.usage;
+  if (u && u.window) return u.window;
+  const agent = currentAgent();
+  const info = state.modelsInfo && state.modelsInfo[agent];
+  if (info && info.context_window) return info.context_window;
+  if (agent === 'claude') return /\[1m\]/i.test(modelFull()) ? 1000000 : 200000;
+  return 0; // 未知则不显示占比
+}
+
 function renderUsageBar() {
   const bar = $('#usage-bar');
   if (!bar || !stream || !stream.usage.has) return;
@@ -2258,12 +2269,26 @@ function renderUsageBar() {
   const speed = u.output / elapsed;
   const den = u.input + u.cr + u.cw;
   const hit = den > 0 ? Math.round((u.cr / den) * 100) : 0;
-  bar.textContent =
+  let text =
     '↑ ' + fmtTok(u.input + u.cr + u.cw) + ' · ↓ ' + fmtTok(u.output) +
     ' · ' + speed.toFixed(1) + ' tok/s · ' + t('缓存') + ' ' + hit + '%';
-  bar.title =
-    'input ' + (u.input) + ' + cache_read ' + u.cr + ' + cache_write ' + u.cw +
+  let tip =
+    'input ' + u.input + ' + cache_read ' + u.cr + ' + cache_write ' + u.cw +
     '\noutput ' + u.output;
+  const win = contextWindowFor();
+  if (win > 0 && u.ctx > 0) {
+    const used = Math.min(100, Math.round((u.ctx / win) * 100));
+    text += ' · ' + t('上下文') + ' ' + used + '%';
+    tip +=
+      '\n' +
+      (CUR_LANG === 'en'
+        ? 'Context window: ' + used + '% used (' + (100 - used) + '% left)\n' +
+          fmtTok(u.ctx) + ' of ' + fmtTok(win) + ' tokens'
+        : '上下文窗口：' + used + '% 已用（剩余 ' + (100 - used) + '%）\n已用 ' +
+          fmtTok(u.ctx) + '，共 ' + fmtTok(win));
+  }
+  bar.textContent = text;
+  bar.title = tip;
   bar.classList.remove('hidden');
 }
 
@@ -2412,6 +2437,8 @@ function handleEvent(ev) {
         u.cr += ev.cache_read || 0;
         u.cw += ev.cache_write || 0;
       }
+      if (ev.context) u.ctx = ev.context;
+      if (ev.window) u.window = ev.window;
       u.has = true;
       renderUsageBar();
       break;
