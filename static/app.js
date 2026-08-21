@@ -2195,6 +2195,7 @@ async function openSession(s) {
     if (!state.session || state.session.id !== s.id || state.session.agent !== s.agent) return; // 已切走
     chatMsgs.textContent = '';
     renderTranscript(chatMsgs, t);
+    if (t.usage) renderUsageFromHistory(t.usage, s.agent); // 已完成会话的整场用量
     if (t.title) {
       state.session.title = t.title;
       setChatHead(state.session);
@@ -2259,6 +2260,50 @@ function contextWindowFor() {
   if (info && info.context_window) return info.context_window;
   if (agent === 'claude') return /\[1m\]/i.test(modelFull()) ? 1000000 : 200000;
   return 0; // 未知则不显示占比
+}
+
+/** 历史会话的整场用量（后端从会话文件聚合） */
+function renderUsageFromHistory(u, agent) {
+  const bar = $('#usage-bar');
+  if (!bar || !u) return;
+  const input = u.input || 0;
+  const out = u.output || 0;
+  const cr = u.cache_read || 0;
+  const cw = u.cache_write || 0;
+  const durS =
+    u.first_ts && u.last_ts
+      ? Math.max(0, (Date.parse(u.last_ts) - Date.parse(u.first_ts)) / 1000)
+      : 0;
+  const speed = durS > 1 ? out / durS : 0;
+  const den = input + cr + cw;
+  const hit = den > 0 ? Math.round((cr / den) * 100) : 0;
+  let text = '↑ ' + fmtTok(den) + ' · ↓ ' + fmtTok(out);
+  if (speed > 0) text += ' · ' + speed.toFixed(1) + ' tok/s';
+  text += ' · ' + t('缓存') + ' ' + hit + '%';
+  let tip =
+    'input ' + input + ' + cache_read ' + cr + ' + cache_write ' + cw + '\noutput ' + out;
+  // 窗口：历史自带 > 模型发现 > 按会话模型名推断
+  let win = u.window || 0;
+  if (!win) {
+    const info = state.modelsInfo && state.modelsInfo[agent];
+    if (info && info.context_window) win = info.context_window;
+    else if (agent === 'claude') win = /\[1m\]/i.test(u.model || '') ? 1000000 : 200000;
+  }
+  const ctx = u.context || 0;
+  if (win > 0 && ctx > 0) {
+    const used = Math.min(100, Math.round((ctx / win) * 100));
+    text += ' · ' + t('上下文') + ' ' + used + '%';
+    tip +=
+      '\n' +
+      (CUR_LANG === 'en'
+        ? 'Context window: ' + used + '% used (' + (100 - used) + '% left)\n' +
+          fmtTok(ctx) + ' of ' + fmtTok(win) + ' tokens'
+        : '上下文窗口：' + used + '% 已用（剩余 ' + (100 - used) + '%）\n已用 ' +
+          fmtTok(ctx) + '，共 ' + fmtTok(win));
+  }
+  bar.textContent = text;
+  bar.title = tip;
+  bar.classList.remove('hidden');
 }
 
 function renderUsageBar() {

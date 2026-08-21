@@ -311,14 +311,43 @@ pub fn transcript(session_id: &str) -> Result<Transcript, String> {
         .ok_or_else(|| format!("未找到 Codex 会话: {session_id}"))?;
 
     let mut messages: Vec<ChatMessage> = Vec::new();
+    let mut usage_total: Option<Value> = None;
+    let (mut u_ctx, mut u_win) = (0i64, 0i64);
+    let mut first_ts: Option<String> = None;
+    let mut last_ts: Option<String> = None;
     for_each_line(&path, |line| {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             return true; // 单行解析失败跳过，不中断
         };
         let ts = v.get("timestamp").and_then(Value::as_str).map(String::from);
+        if first_ts.is_none() {
+            first_ts = ts.clone();
+        }
+        if ts.is_some() {
+            last_ts = ts.clone();
+        }
         let Some(payload) = v.get("payload") else {
             return true;
         };
+        // 用量：token_count 事件（新式 info.total_token_usage / 旧式扁平字段）
+        if v.get("type").and_then(Value::as_str) == Some("event_msg")
+            && payload.get("type").and_then(Value::as_str) == Some("token_count")
+        {
+            let info = payload.get("info").unwrap_or(payload);
+            let tot = info.get("total_token_usage").unwrap_or(info);
+            usage_total = Some(tot.clone());
+            if let Some(last) = info.get("last_token_usage") {
+                let g = |k: &str| last.get(k).and_then(Value::as_i64).unwrap_or(0);
+                let c = g("input_tokens") + g("cached_input_tokens");
+                if c > 0 {
+                    u_ctx = c;
+                }
+            }
+            if let Some(w) = info.get("model_context_window").and_then(Value::as_i64) {
+                u_win = w;
+            }
+            return true;
+        }
         match v.get("type").and_then(Value::as_str) {
             Some("response_item") => handle_response_item(&mut messages, payload, ts),
             Some("event_msg") => handle_event_msg(&mut messages, payload, ts),
@@ -337,12 +366,25 @@ pub fn transcript(session_id: &str) -> Result<Transcript, String> {
         true
     });
 
+    let usage = usage_total.map(|tot| {
+        let g = |k: &str| tot.get(k).and_then(Value::as_i64).unwrap_or(0);
+        let input = g("input_tokens");
+        let cr = g("cached_input_tokens");
+        serde_json::json!({
+            "input": input, "output": g("output_tokens"),
+            "cache_read": cr, "cache_write": g("cache_write_input_tokens"),
+            "context": if u_ctx > 0 { u_ctx } else { input + cr },
+            "window": if u_win > 0 { Some(u_win) } else { None },
+            "first_ts": first_ts, "last_ts": last_ts,
+        })
+    });
     Ok(Transcript {
         agent: "codex".to_string(),
         id: entry.id,
         project: entry.cwd,
         title: entry.title,
         messages,
+        usage,
     })
 }
 

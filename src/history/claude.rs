@@ -382,6 +382,10 @@ pub fn transcript(project: &str, session_id: &str) -> Result<Transcript, String>
     let mut messages: Vec<ChatMessage> = Vec::new();
     let mut file_cwd: Option<String> = None;
     let mut fallback_title: Option<String> = None;
+    let (mut u_in, mut u_out, mut u_cr, mut u_cw, mut u_ctx) = (0i64, 0i64, 0i64, 0i64, 0i64);
+    let mut first_ts: Option<String> = None;
+    let mut last_ts: Option<String> = None;
+    let mut last_model: Option<String> = None;
     for_each_line(&path, |line| {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             return true; // 单行解析失败跳过，不中断
@@ -413,17 +417,53 @@ pub fn transcript(project: &str, session_id: &str) -> Result<Transcript, String>
             if msg.get("model").and_then(Value::as_str) == Some("<synthetic>") {
                 return true;
             }
+            // 整场用量累计（context = 最后一次调用的完整 prompt 规模）
+            if let Some(u) = msg.get("usage") {
+                let g = |k: &str| u.get(k).and_then(Value::as_i64).unwrap_or(0);
+                let (i, cr, cw) = (
+                    g("input_tokens"),
+                    g("cache_read_input_tokens"),
+                    g("cache_creation_input_tokens"),
+                );
+                u_in += i;
+                u_cr += cr;
+                u_cw += cw;
+                u_out += g("output_tokens");
+                if i + cr + cw > 0 {
+                    u_ctx = i + cr + cw;
+                }
+            }
+            if let Some(m) = msg.get("model").and_then(Value::as_str) {
+                last_model = Some(m.to_string());
+            }
             assistant_blocks(msg.get("content"))
         };
+        let ts_s = v.get("timestamp").and_then(Value::as_str).map(String::from);
+        if first_ts.is_none() {
+            first_ts = ts_s.clone();
+        }
+        if ts_s.is_some() {
+            last_ts = ts_s.clone();
+        }
         if !blocks.is_empty() {
             messages.push(ChatMessage {
                 role,
-                ts: v.get("timestamp").and_then(Value::as_str).map(String::from),
+                ts: ts_s,
                 blocks,
             });
         }
         true
     });
+    let usage = if u_out > 0 {
+        Some(serde_json::json!({
+            "input": u_in, "output": u_out,
+            "cache_read": u_cr, "cache_write": u_cw,
+            "context": u_ctx, "first_ts": first_ts, "last_ts": last_ts,
+            "model": last_model,
+        }))
+    } else {
+        None
+    };
 
     let title = history_title(session_id)
         .or(fallback_title)
@@ -435,6 +475,7 @@ pub fn transcript(project: &str, session_id: &str) -> Result<Transcript, String>
         project: file_cwd.unwrap_or(normalized),
         title,
         messages,
+        usage,
     })
 }
 

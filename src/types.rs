@@ -56,6 +56,8 @@ pub struct Transcript {
     pub project: String,
     pub title: String,
     pub messages: Vec<ChatMessage>,
+    /// 整场用量汇总（input/output/cache_read/cache_write/context/window/first_ts/last_ts/model）
+    pub usage: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Clone, Debug)]
