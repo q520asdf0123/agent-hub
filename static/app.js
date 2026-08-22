@@ -1518,9 +1518,17 @@ function syncAgentUI() {
   mb.title = '模型：' + modelFull();
   // 快速：claude = fastMode 设置；codex = 低思考等级快捷开关
   // （实测 codex CLI 0.148 无 speed tier 参数；官方对 low 的描述即 fast responses）
-  // SAGE 智能路由：只对新会话有意义（已绑定会话隐藏）
+  // SAGE 智能路由：新会话 = 选执行者；绑定的协作会话 = 追问分诊（开关同一个）
   const sageBtn = $('#sage-btn');
-  sageBtn.classList.toggle('hidden', !canSwitchAgent());
+  const hasCollab = !!(
+    state.session &&
+    state.session.id &&
+    (collabStoreLoad().links[state.session.agent + ':' + state.session.id] || []).length
+  );
+  sageBtn.classList.toggle('hidden', !canSwitchAgent() && !hasCollab);
+  sageBtn.title = canSwitchAgent()
+    ? 'SAGE 智能路由：按任务需求自动在 Claude Code / Codex 间选择执行者'
+    : 'SAGE 追问分诊：属搭档擅长域的追问自动转子会话执行并回注';
   sageBtn.classList.toggle('on', state.sageOn);
   setToggleChip(sageBtn, t('🧭 智能路由'), state.sageOn);
   // 快速开关（两家都是真实机制，与思考等级相互独立）：
