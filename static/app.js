@@ -2240,7 +2240,8 @@ function beginAssistant() {
     cur: null,
     stderrPre: null,
     startedAt: Date.now(),
-    usage: { input: 0, output: 0, cr: 0, cw: 0, ctx: 0, window: 0, has: false },
+    usage: { input: 0, output: 0, cr: 0, cw: 0, ctx: 0, window: 0, has: false, abs: false },
+    spd0: null, // 本轮速度基点（首个整场权威值的 {out, t}）
     finalText: '',
     doneOk: false,
     // 续聊/重连：以历史用量为基线，实时数值 = 基线 + 本轮增量
@@ -2329,19 +2330,34 @@ function renderUsageBar() {
   if (!bar || !stream) return;
   const b = stream.base;
   if (!stream.usage.has && !b) return;
-  // 合并基线（历史）与本轮增量
   const raw = stream.usage;
-  const u = {
-    input: raw.input + (b ? b.input : 0),
-    output: raw.output + (b ? b.output : 0),
-    cr: raw.cr + (b ? b.cr : 0),
-    cw: raw.cw + (b ? b.cw : 0),
-    ctx: raw.ctx || (b ? b.ctx : 0),
-    window: raw.window || (b ? b.window : 0),
-  };
-  const t0 = b && b.firstTs ? b.firstTs : stream.startedAt;
-  const elapsed = Math.max(1, (Date.now() - t0) / 1000);
-  const speed = u.output / elapsed;
+  // abs（scope=session 权威值）已含整场累计，直接用；否则基线（历史）+ 本轮增量
+  const u = raw.abs
+    ? {
+        input: raw.input,
+        output: raw.output,
+        cr: raw.cr,
+        cw: raw.cw,
+        ctx: raw.ctx || (b ? b.ctx : 0),
+        window: raw.window || (b ? b.window : 0),
+      }
+    : {
+        input: raw.input + (b ? b.input : 0),
+        output: raw.output + (b ? b.output : 0),
+        cr: raw.cr + (b ? b.cr : 0),
+        cw: raw.cw + (b ? b.cw : 0),
+        ctx: raw.ctx || (b ? b.ctx : 0),
+        window: raw.window || (b ? b.window : 0),
+      };
+  // 速度 = 本轮实时速率（Δ输出 / Δ时间），每秒随定时器刷新
+  let speed;
+  if (raw.abs && stream.spd0) {
+    speed =
+      Math.max(0, raw.output - stream.spd0.out) /
+      Math.max(1, (Date.now() - stream.spd0.t) / 1000);
+  } else {
+    speed = raw.output / Math.max(1, (Date.now() - stream.startedAt) / 1000);
+  }
   const den = u.input + u.cr + u.cw;
   const hit = den > 0 ? Math.round((u.cr / den) * 100) : 0;
   let text =
@@ -2510,6 +2526,12 @@ function handleEvent(ev) {
         u.output = ev.output || 0;
         u.cr = ev.cache_read || 0;
         u.cw = ev.cache_write || 0;
+        // scope=session（codex 回放文件旁路）：整场权威值，含续聊前的全部
+        if (ev.scope === 'session') {
+          u.abs = true;
+          // 本轮速度基点：首个权威值的输出量与时刻
+          if (!stream.spd0) stream.spd0 = { out: u.output, t: Date.now() };
+        }
       } else {
         u.input += ev.input || 0;
         u.output += ev.output || 0;

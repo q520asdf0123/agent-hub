@@ -254,6 +254,7 @@ pub async fn stream_chat(registry: &RunRegistry, req: ChatReq) -> Response {
     tokio::spawn(async move {
         let mut st = MapState::default();
         let mut killed = false;
+        let mut tailer_spawned = false;
         loop {
             tokio::select! {
                 _ = pump.kill.notified(), if !killed => {
@@ -269,6 +270,12 @@ pub async fn stream_chat(registry: &RunRegistry, req: ChatReq) -> Response {
                         };
                         for ev in &events {
                             pump.push(ev);
+                        }
+                        // codex 的 exec 流只在回合结束报一次用量 → 拿到会话 id 后
+                        // 起旁路 task 持续从回放文件读实时 token_count
+                        if !tailer_spawned && agent == "codex" && st.session_id.is_some() {
+                            tailer_spawned = true;
+                            tokio::spawn(codex_usage_tailer(pump.clone()));
                         }
                     }
                     Some(Line::Err(l)) => {
@@ -309,6 +316,57 @@ pub async fn stream_chat(registry: &RunRegistry, req: ChatReq) -> Response {
 
     // 发起方连接：全量回放 + 实时跟随（断开不影响泵任务）
     attach(rs, Some(run_id), 0)
+}
+
+/// codex 实时用量旁路：`exec --json` 的 stdout 流只在回合结束给一次 usage，
+/// 而回放文件在整个回合期间持续写 token_count（含 last_token_usage 上下文与
+/// model_context_window）。运行期间每 2 秒读一次文件尾部，把最新一条转成
+/// scope=session 的 usage 事件推给订阅方，run 结束自动退出。
+async fn codex_usage_tailer(rs: Arc<RunState>) {
+    let mut path: Option<std::path::PathBuf> = None;
+    let mut last_sig = String::new();
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        if rs.is_done() {
+            return;
+        }
+        let Some(sid) = rs.session_id.lock().unwrap().clone() else {
+            continue;
+        };
+        if path.is_none() {
+            path = crate::history::codex::rollout_path_for(&sid);
+        }
+        let Some(p) = path.clone() else { continue };
+        let info = tokio::task::spawn_blocking(move || {
+            crate::history::codex::latest_token_count(&p)
+        })
+        .await
+        .ok()
+        .flatten();
+        let Some(info) = info else { continue };
+        let sig = info.to_string();
+        if sig == last_sig {
+            continue; // 没有新数据，不重复推送
+        }
+        last_sig = sig;
+        let tot = info.get("total_token_usage").unwrap_or(&info);
+        if let Some(mut e) = usage_event("set", tot) {
+            e["scope"] = json!("session");
+            if let Some(last) = info.get("last_token_usage") {
+                let g = |k: &str| last.get(k).and_then(Value::as_i64).unwrap_or(0);
+                let ctx = g("input_tokens"); // OpenAI 语义已含缓存 → 即当前上下文占用
+                if ctx > 0 {
+                    e["context"] = json!(ctx);
+                }
+            } else if let Some(o) = e.as_object_mut() {
+                o.remove("context");
+            }
+            if let Some(w) = info.get("model_context_window").and_then(Value::as_i64) {
+                e["window"] = json!(w);
+            }
+            rs.push(&e);
+        }
+    }
 }
 
 /// 读管道任务：split(b'\n') 逐段读取 + from_utf8_lossy（与 history/claude.rs for_each_line
@@ -737,13 +795,16 @@ fn codex_map_line(line: &str, st: &mut MapState) -> Vec<Value> {
             .or_else(|| ev.get("info"))
             .unwrap_or(ev);
         if let Some(mut e) = usage_event("set", u) {
-            // 上下文占用取最后一次请求的 prompt 规模（total 是全程累计，不代表上下文）
+            e["scope"] = json!("session"); // total_token_usage 是整场累计（含 resume 之前）
+            // 上下文占用 = 最后一次请求的 input_tokens（OpenAI 语义已含缓存部分）
             if let Some(last) = ev.pointer("/info/last_token_usage") {
                 let g = |k: &str| last.get(k).and_then(Value::as_i64).unwrap_or(0);
-                let ctx = g("input_tokens") + g("cached_input_tokens");
+                let ctx = g("input_tokens");
                 if ctx > 0 {
                     e["context"] = json!(ctx);
                 }
+            } else if let Some(o) = e.as_object_mut() {
+                o.remove("context"); // 全程累计不代表上下文，缺 last 时不给
             }
             if let Some(w) = ev
                 .pointer("/info/model_context_window")
@@ -755,12 +816,10 @@ fn codex_map_line(line: &str, st: &mut MapState) -> Vec<Value> {
         }
         return out;
     }
+    // turn.completed 的 usage 不再采用：它是该回合所有请求的 input 累加（含缓存、
+    // 可达数百万），既不是上下文也与整场口径冲突；实时用量由 codex_usage_tailer
+    // 从回放文件的 token_count 持续补发（含真实 last_token_usage 与窗口）。
     if etype.contains("turn") && etype.contains("completed") {
-        if let Some(u) = ev.get("usage") {
-            if let Some(e) = usage_event("set", u) {
-                out.push(e);
-            }
-        }
         return out;
     }
     // item 类：item.started / item.updated / item.completed（及 item_completed 变体）。
@@ -928,9 +987,12 @@ fn codex_map_item(item: &Value, st: &mut MapState) -> Vec<Value> {
 /// codex（cached_input_tokens）字段名。mode=add 增量累计 / set 权威覆盖。
 fn usage_event(mode: &str, u: &Value) -> Option<Value> {
     let g = |k: &str| u.get(k).and_then(Value::as_i64).unwrap_or(0);
-    let input = g("input_tokens");
+    // codex（OpenAI 语义）的 input_tokens 已包含 cached_input_tokens，拆出未命中部分；
+    // claude（Anthropic 语义）的 input 本就不含缓存，该键不存在，减 0 无影响。
+    let codex_cached = g("cached_input_tokens");
+    let input = (g("input_tokens") - codex_cached).max(0);
     let output = g("output_tokens");
-    let cache_read = g("cache_read_input_tokens") + g("cached_input_tokens");
+    let cache_read = g("cache_read_input_tokens") + codex_cached;
     let cache_write = g("cache_creation_input_tokens") + g("cache_write_input_tokens");
     if input == 0 && output == 0 && cache_read == 0 && cache_write == 0 {
         return None;

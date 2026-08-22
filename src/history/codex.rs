@@ -88,6 +88,51 @@ fn collect_files() -> Vec<(PathBuf, SystemTime, bool)> {
     out
 }
 
+/// 按会话 id 定位 rollout 文件（文件名含 id；多处匹配取 mtime 最新）。
+pub fn rollout_path_for(session_id: &str) -> Option<PathBuf> {
+    if session_id.is_empty() {
+        return None;
+    }
+    collect_files()
+        .into_iter()
+        .filter(|(p, _, _)| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.contains(session_id))
+                .unwrap_or(false)
+        })
+        .max_by_key(|(_, mt, _)| *mt)
+        .map(|(p, _, _)| p)
+}
+
+/// 文件尾部（64KB）最后一条 token_count 的 info（运行中实时用量旁路用）。
+pub fn latest_token_count(path: &Path) -> Option<Value> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    let take = len.min(64 * 1024);
+    f.seek(SeekFrom::End(-(take as i64))).ok()?;
+    let mut buf = Vec::with_capacity(take as usize);
+    f.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    for line in text.lines().rev() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue; // 截断产生的半行或非 JSON 行
+        };
+        if v.get("type").and_then(Value::as_str) != Some("event_msg") {
+            continue;
+        }
+        let Some(p) = v.get("payload") else { continue };
+        if p.get("type").and_then(Value::as_str) == Some("token_count") {
+            return match p.get("info") {
+                Some(i) if !i.is_null() => Some(i.clone()),
+                _ => Some(p.clone()), // 旧式扁平字段
+            };
+        }
+    }
+    None
+}
+
 /// 读首行 session_meta + 向后最多 30 行找标题，构建索引条目。
 fn index_file(path: &Path) -> IndexEntry {
     let mut entry = IndexEntry {
@@ -337,8 +382,11 @@ pub fn transcript(session_id: &str) -> Result<Transcript, String> {
             let tot = info.get("total_token_usage").unwrap_or(info);
             usage_total = Some(tot.clone());
             if let Some(last) = info.get("last_token_usage") {
-                let g = |k: &str| last.get(k).and_then(Value::as_i64).unwrap_or(0);
-                let c = g("input_tokens") + g("cached_input_tokens");
+                // OpenAI 语义 input_tokens 已含缓存 → 即当前上下文占用
+                let c = last
+                    .get("input_tokens")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
                 if c > 0 {
                     u_ctx = c;
                 }
@@ -368,8 +416,10 @@ pub fn transcript(session_id: &str) -> Result<Transcript, String> {
 
     let usage = usage_total.map(|tot| {
         let g = |k: &str| tot.get(k).and_then(Value::as_i64).unwrap_or(0);
-        let input = g("input_tokens");
+        // OpenAI 语义：input_tokens 已包含 cached_input_tokens → 拆出未命中部分，
+        // 与 claude（input 不含缓存）统一口径，前端 input+cache_read 即总输入
         let cr = g("cached_input_tokens");
+        let input = (g("input_tokens") - cr).max(0);
         serde_json::json!({
             "input": input, "output": g("output_tokens"),
             "cache_read": cr, "cache_write": g("cache_write_input_tokens"),
