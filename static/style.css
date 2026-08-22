@@ -766,6 +766,15 @@ button { font-family: inherit; }
   font-family: Consolas, "Cascadia Mono", monospace;
 }
 .run-ticker-text.tick { animation: ticker-in 0.25s ease; }
+
+/* 协作缝合段：左侧细线标识子会话来源；跳转分隔线可点击 */
+.collab-stitch {
+  border-left: 2px solid rgba(232, 150, 74, 0.35);
+  padding-left: 14px;
+  margin: 6px 0;
+}
+.divider.collab-jump { cursor: pointer; }
+.divider.collab-jump:hover span { color: var(--accent2); }
 @keyframes ticker-pulse {
   0%, 100% { opacity: 0.35; transform: scale(0.85); }
   50% { opacity: 1; transform: scale(1); }

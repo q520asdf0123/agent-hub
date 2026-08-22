@@ -10,6 +10,8 @@ const I18N_EN = {
   '搜索会话': 'Search sessions', '新建会话': 'New session', '项目': 'Projects', '对话': 'Chats',
   '在文本框中显示': 'Show in input', '移除': 'Remove', '点击展开 / 收起': 'Click to expand / collapse',
   '🧠 记忆': '🧠 Memory',
+  '🤝 协作分工任务书': '🤝 Work-division brief', '🤝 分工产出回注': '🤝 Consolidated partner output',
+  '🤝 复查意见回注': '🤝 Review feedback', '🤝 协作复查任务书': '🤝 Review brief',
   '搜索结果': 'Results', '技能': 'Skills', '图片': 'Image', '本地': 'Local', '收起': 'Collapse',
   '收起文件 ⌃': 'Collapse files ⌃', '已处理': 'Processed in', '(无标题)': '(untitled)',
   '暂无对话': 'No chats yet', '没有匹配的会话': 'No matching sessions', '搜索失败：': 'Search failed: ',
@@ -1635,7 +1637,40 @@ function setChatHead(sess) {
 
 /* ---------- 转录渲染 ---------- */
 
+/** 协作注入消息（分工任务书/复查意见/汇总回注）：正文冗长，渲染为默认收起的卡片 */
+const COLLAB_PREFIXES = [
+  ['【协作分工】', '🤝 协作分工任务书'],
+  ['【协作汇总】', '🤝 分工产出回注'],
+  ['【协作复查回注】', '🤝 复查意见回注'],
+  ['【协作复查】', '🤝 协作复查任务书'],
+];
+
+function collabInjectCard(text) {
+  const hit = COLLAB_PREFIXES.find(([p]) => text.startsWith(p));
+  if (!hit) return null;
+  const card = el('div', 'card collab-inject');
+  const head = el('div', 'card-head');
+  head.appendChild(el('span', 'card-caret', '▸'));
+  head.appendChild(el('span', 'card-title', t(hit[1])));
+  const body = el('div', 'card-body');
+  const pre = el('pre', 'io-pre');
+  pre.textContent = text;
+  body.appendChild(pre);
+  card.appendChild(head);
+  card.appendChild(body);
+  head.addEventListener('click', () => card.classList.toggle('open'));
+  return card;
+}
+
 function appendUserBubble(container, text, imgs) {
+  // 协作流程的注入消息不占满屏——折叠卡展示，点击可看全文
+  if (text && !(imgs && imgs.length)) {
+    const cc = collabInjectCard(text);
+    if (cc) {
+      container.appendChild(cc);
+      return;
+    }
+  }
   const wrap = el('div', 'msg-user');
   if (imgs && imgs.length) {
     const strip = el('div', 'msg-img-strip');
@@ -2296,6 +2331,7 @@ async function openSession(s) {
       if (firstAsst) chatMsgs.insertBefore(card, firstAsst);
       else chatMsgs.appendChild(card);
     }
+    stitchCollab(s); // 协作子会话缝合（异步补入，不阻塞打开）
     state.histUsage = t.usage || null; // 供续聊/重连作为用量基线
     if (t.usage) renderUsageFromHistory(t.usage, s.agent); // 已完成会话的整场用量
     if (t.title) {
@@ -2859,6 +2895,99 @@ function showToast(msg) {
   }, 3200);
 }
 
+/* ---------- 协作会话关联持久化（刷新后把子会话缝合回主会话视图） ---------- */
+
+function collabStoreLoad() {
+  try {
+    return JSON.parse(localStorage.getItem('ah-collab')) || { links: {}, back: {} };
+  } catch (_) {
+    return { links: {}, back: {} };
+  }
+}
+
+function collabLinkSave(primaryKey, entry, partnerKey) {
+  const st = collabStoreLoad();
+  st.links[primaryKey] = st.links[primaryKey] || [];
+  st.links[primaryKey].push(entry);
+  st.back[partnerKey] = primaryKey;
+  const keys = Object.keys(st.links);
+  while (keys.length > 80) {
+    delete st.links[keys.shift()]; // 只留最近 80 个主会话的关联
+  }
+  localStorage.setItem('ah-collab', JSON.stringify(st));
+}
+
+/** 打开会话时缝合协作关联：主会话内联子会话内容；子会话给出主会话入口 */
+async function stitchCollab(s) {
+  const key = s.agent + ':' + s.id;
+  const st = collabStoreLoad();
+  const primaryKey = st.back[key];
+  if (primaryKey) {
+    const d = renderDivider(
+      CUR_LANG === 'en'
+        ? '🤝 Collab sub-session · click to open the main session'
+        : '🤝 协作子会话 · 点击打开主会话'
+    );
+    d.classList.add('collab-jump');
+    d.addEventListener('click', () => {
+      const i = primaryKey.indexOf(':');
+      openSession({
+        agent: primaryKey.slice(0, i),
+        id: primaryKey.slice(i + 1),
+        project: s.project,
+        title: '',
+      });
+    });
+    chatMsgs.insertBefore(d, chatMsgs.firstChild);
+  }
+  const links = st.links[key];
+  if (!links || !links.length) return;
+  for (const ln of links) {
+    try {
+      const i = ln.partner.indexOf(':');
+      const qs = new URLSearchParams({
+        agent: ln.partner.slice(0, i),
+        id: ln.partner.slice(i + 1),
+        project: s.project || '',
+      });
+      const tr = await api.get('/api/session?' + qs);
+      if (!state.session || state.session.id !== s.id || state.session.agent !== s.agent) return;
+      const sec = el('div', 'collab-stitch');
+      const title =
+        ln.kind === 'pipeline'
+          ? (CUR_LANG === 'en' ? '🤝 Division of work · ' : '🤝 分工执行 · ') +
+            ln.label + (ln.cats ? '（' + ln.cats + '）' : '')
+          : (CUR_LANG === 'en' ? '🤝 Collaborative review · ' : '🤝 协作复查 · ') + ln.label;
+      const secDiv = renderDivider(
+        title + (CUR_LANG === 'en' ? ' · click to open sub-session' : ' · 点击打开子会话可追问')
+      );
+      secDiv.classList.add('collab-jump');
+      const pk = ln.partner;
+      secDiv.addEventListener('click', () => {
+        const j = pk.indexOf(':');
+        openSession({ agent: pk.slice(0, j), id: pk.slice(j + 1), project: s.project, title: '' });
+      });
+      sec.appendChild(secDiv);
+      const inner = el('div');
+      renderTranscript(inner, tr);
+      // 子会话首条注入任务书与主会话内容重复 → 缝合视图里去掉
+      const firstInject = inner.querySelector('.collab-inject');
+      if (firstInject) firstInject.remove();
+      sec.appendChild(inner);
+      // 插到对应的回注卡之前（时间序一一对应；找不到则追加到末尾）
+      const anchors = [...chatMsgs.querySelectorAll('.collab-inject')].filter((c) =>
+        /分工产出回注|复查意见回注|Consolidated partner output|Review feedback/.test(c.textContent || '')
+      );
+      const anchor = anchors[links.indexOf(ln)] || null;
+      if (anchor && anchor.parentNode === chatMsgs) chatMsgs.insertBefore(sec, anchor);
+      else chatMsgs.appendChild(sec);
+      scrollChat();
+    } catch (_) {
+      /* 子会话取不到（被删等）就跳过 */
+    }
+  }
+}
+
 /* ---------- 路由决策按会话持久化（刷新/重开会话后重现决策卡） ---------- */
 
 function sageStoreLoad() {
@@ -2966,10 +3095,14 @@ async function runCollabReview(collab, primaryText) {
   setSendButton(true);
   const ac = new AbortController();
   state.abort = ac;
-  // 守卫：复查是独立会话，不接管当前会话 id
+  // 守卫：复查是独立会话，不接管当前会话 id（但记录子会话 id 供关联缝合）
+  const guardSid = { id: null };
   const guard = (ev) => {
     if (!ev) return;
-    if (ev.t === 'init') return;
+    if (ev.t === 'init') {
+      if (ev.session_id && !guardSid.id) guardSid.id = ev.session_id;
+      return;
+    }
     if (ev.t === 'done') {
       if (stream) {
         flushFilesCard(stream.ctx);
@@ -3006,6 +3139,14 @@ async function runCollabReview(collab, primaryText) {
     state.runId = null;
     setSendButton(false);
     loadConvs(); // 复查会话已落盘，出现在侧栏
+    // 关联持久化：刷新/重开后可把复查内容缝合回主会话
+    if (guardSid.id) {
+      collabLinkSave(
+        primarySess.agent + ':' + primarySess.id,
+        { partner: collab.partner + ':' + guardSid.id, label: partnerLabel, kind: 'review', ts: Date.now() },
+        collab.partner + ':' + guardSid.id
+      );
+    }
   }
   // 第三步：复查结论回注主会话，由主 agent 确认/修正收尾（结果沉淀在主会话）
   if (
@@ -3075,10 +3216,14 @@ async function runCollabPipeline(collab, primaryText, meta) {
   setSendButton(true);
   const ac = new AbortController();
   state.abort = ac;
-  // 守卫：分工段是独立会话，不接管当前会话 id
+  // 守卫：分工段是独立会话，不接管当前会话 id（但记录子会话 id 供关联缝合）
+  const guardSid = { id: null };
   const guard = (ev) => {
     if (!ev) return;
-    if (ev.t === 'init') return;
+    if (ev.t === 'init') {
+      if (ev.session_id && !guardSid.id) guardSid.id = ev.session_id;
+      return;
+    }
     if (ev.t === 'done') {
       if (stream) {
         flushFilesCard(stream.ctx);
@@ -3117,6 +3262,20 @@ async function runCollabPipeline(collab, primaryText, meta) {
     state.runId = null;
     setSendButton(false);
     loadConvs(); // 分工会话已落盘
+    // 关联持久化：刷新/重开后可把分工内容缝合回主会话
+    if (guardSid.id) {
+      collabLinkSave(
+        primarySess.agent + ':' + primarySess.id,
+        {
+          partner: collab.partner + ':' + guardSid.id,
+          label: partnerLabel,
+          kind: 'pipeline',
+          cats: cats.join('、'),
+          ts: Date.now(),
+        },
+        collab.partner + ':' + guardSid.id
+      );
+    }
   }
   // 统一回喂：整体成功按需求权重加权；附按 agent / 按需求评分（库的证据粒度）
   if (meta && meta.blob) {
