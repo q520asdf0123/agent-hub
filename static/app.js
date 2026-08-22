@@ -48,8 +48,9 @@ const I18N_EN = {
   '执行了操作': 'Performed actions', '⚡ 快速': '⚡ Fast', '⚡ 快速·开': '⚡ Fast · on',
   '🧭 智能路由': '🧭 Smart routing', '🧭 智能路由·开': '🧭 Routing · on', '🧭 路由中…': '🧭 Routing…',
   '🧭 SAGE 路由': '🧭 SAGE routing', '继续当前': 'Stay', '移交': 'Handoff', '协作': 'Collaborate',
-  '需求推断：': 'Inferred needs: ', '协作：完成后由 ': 'Collaborate: auto-review afterwards by ',
-  ' 自动复查': '', '成功率 ': 'Success ', ' · 覆盖 ': ' · Coverage ', ' · 效用 ': ' · Utility ',
+  '需求推断：': 'Inferred needs: ', '协作：完成后由 ': 'Collaborate: reviewed by ',
+  ' 复查，结论回注收尾': ', findings fed back to wrap up',
+  '成功率 ': 'Success ', ' · 覆盖 ': ' · Coverage ', ' · 效用 ': ' · Utility ',
   '点击查看差异 · 右键更多操作': 'Click for diff · right-click for more', '缓存': 'Cache', '上下文': 'Context', '点击放大': 'Click to zoom',
   '刚刚': 'just now', '跟随浏览器': 'Follow browser', '选择项目…': 'Pick a project…',
   '移除图片': 'Remove image', '＋ 导入项目…': '+ Import project…',
@@ -2718,7 +2719,7 @@ function sageCard(d) {
   if (reqs) lines.push(t('需求推断：') + reqs);
   if (d.partner) {
     const p = AGENTS[d.partner] ? AGENTS[d.partner].label : d.partner;
-    lines.push(t('协作：完成后由 ') + p + t(' 自动复查'));
+    lines.push(t('协作：完成后由 ') + p + t(' 复查，结论回注收尾'));
   }
   lines.push(
     t('成功率 ') + d.success_probability + t(' · 覆盖 ') + d.coverage + t(' · 效用 ') + d.utility
@@ -2733,9 +2734,15 @@ function sageCard(d) {
   return card;
 }
 
-/** 真协作：主执行者完成后，搭档 agent 只读复查其结论并流式追加 */
+/** 真协作（子代理模式）：主执行完成 → 搭档只读复查 → 结论回注主会话收尾 */
 async function runCollabReview(collab, primaryText) {
   if (!state.session || !primaryText.trim()) return;
+  // 记住主会话（回注目标）；复查期间用户可能切走，回注前再校验
+  const primarySess = {
+    agent: state.session.agent,
+    id: state.session.id,
+    project: state.session.project,
+  };
   const partnerLabel = AGENTS[collab.partner].label;
   const primaryLabel = AGENTS[state.session.agent]
     ? AGENTS[state.session.agent].label
@@ -2790,6 +2797,8 @@ async function runCollabReview(collab, primaryText) {
     }
     handleEvent(ev);
   };
+  let reviewFinal = '';
+  let reviewOk = false;
   try {
     await streamChat(req, guard, ac.signal);
   } catch (e) {
@@ -2797,12 +2806,79 @@ async function runCollabReview(collab, primaryText) {
       stream.ctx.bodyEl.appendChild(el('div', 'error-bar', t('请求失败：') + (e.message || e)));
     }
   } finally {
+    if (stream) {
+      reviewFinal = stream.finalText || '';
+      reviewOk = !!stream.doneOk;
+    }
     finalizeStream();
     state.streaming = false;
     state.abort = null;
     state.runId = null;
     setSendButton(false);
     loadConvs(); // 复查会话已落盘，出现在侧栏
+  }
+  // 第三步：复查结论回注主会话，由主 agent 确认/修正收尾（结果沉淀在主会话）
+  if (
+    reviewOk &&
+    reviewFinal.trim() &&
+    state.session &&
+    state.session.id === primarySess.id &&
+    state.session.agent === primarySess.agent
+  ) {
+    await runCollabFeedback(primarySess, partnerLabel, reviewFinal);
+  }
+}
+
+/** 协作第三步：子代理复查结论交还主 agent，在主会话内续跑一轮收尾 */
+async function runCollabFeedback(primarySess, partnerLabel, reviewText) {
+  const primaryLabel = AGENTS[primarySess.agent]
+    ? AGENTS[primarySess.agent].label
+    : primarySess.agent;
+  chatMsgs.appendChild(
+    renderDivider(
+      (CUR_LANG === 'en' ? '🤝 Feedback · ' : '🤝 复查回注 · ') + primaryLabel +
+      (CUR_LANG === 'en' ? ' wraps up' : ' 收尾')
+    )
+  );
+  const prompt =
+    '【协作复查回注】搭档 agent（' + partnerLabel + '）对你上一轮工作的只读复查意见如下：\n\n' +
+    reviewText +
+    '\n\n请核对以上意见：确认无误的部分简要说明；确有问题的部分直接修正并说明改动。';
+  appendUserBubble(chatMsgs, prompt, []);
+  scrollChat();
+  beginAssistant();
+  const req = {
+    agent: primarySess.agent,
+    project: primarySess.project,
+    prompt,
+    session_id: primarySess.id,
+    model: null,
+    permission: state.permission,
+    effort: null,
+    fast: false,
+  };
+  state.streaming = true;
+  state.runId = null;
+  setSendButton(true);
+  const ac = new AbortController();
+  state.abort = ac;
+  try {
+    await streamChat(req, handleEvent, ac.signal);
+  } catch (e) {
+    if (stream) {
+      if (e && e.name === 'AbortError') {
+        stream.ctx.bodyEl.appendChild(el('div', 'status-line', t('↪ 已断开查看，任务在后台继续')));
+      } else {
+        stream.ctx.bodyEl.appendChild(el('div', 'error-bar', t('请求失败：') + (e.message || e)));
+      }
+    }
+  } finally {
+    finalizeStream();
+    state.streaming = false;
+    state.abort = null;
+    state.runId = null;
+    setSendButton(false);
+    loadConvs();
   }
 }
 
