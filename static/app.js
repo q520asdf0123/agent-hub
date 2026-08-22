@@ -1843,6 +1843,8 @@ function extractInlineImages(text) {
 
 function renderDivider(text) {
   const d = el('div', 'divider');
+  // 报错分隔线标红（转录里的 ⚠ 运行报错：…）
+  if (text && text.startsWith('⚠ 运行报错')) d.classList.add('divider-error');
   d.appendChild(el('span', null, text || '· · ·'));
   return d;
 }
