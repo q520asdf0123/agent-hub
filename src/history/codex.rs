@@ -686,14 +686,23 @@ fn handle_event_msg(messages: &mut Vec<ChatMessage>, payload: &Value, ts: Option
                 }],
             });
         }
-        // 运行报错：error / turn_failed 事件，或 task_complete 携带错误消息
-        //（如额度 429）。不映射的话报错在重开会话后就"消失"了。
+        // 运行报错：error / turn_failed 事件，或 task_complete 携带错误
+        //（如额度 429）。两种形态：顶层 message + codex_error_info，或嵌套
+        // error:{message, codex_error_info}。不映射的话报错重开会话后就"消失"。
         Some(t @ ("error" | "stream_error" | "turn_failed" | "task_complete")) => {
+            let err_obj = payload.get("error").filter(|e| !e.is_null());
             let msg = payload
                 .get("message")
                 .and_then(Value::as_str)
+                .or_else(|| {
+                    err_obj
+                        .and_then(|e| e.get("message"))
+                        .and_then(Value::as_str)
+                })
                 .filter(|s| !s.trim().is_empty());
-            let is_err = t != "task_complete" || payload.get("codex_error_info").is_some();
+            let is_err = t != "task_complete"
+                || err_obj.is_some()
+                || payload.get("codex_error_info").is_some();
             if let (Some(m), true) = (msg, is_err) {
                 messages.push(crate::types::ChatMessage {
                     role: "system".to_string(),
