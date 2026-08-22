@@ -8,6 +8,7 @@ let CUR_LANG = 'zh';
 
 const I18N_EN = {
   '搜索会话': 'Search sessions', '新建会话': 'New session', '项目': 'Projects', '对话': 'Chats',
+  '在文本框中显示': 'Show in input', '移除': 'Remove',
   '搜索结果': 'Results', '技能': 'Skills', '图片': 'Image', '本地': 'Local', '收起': 'Collapse',
   '收起文件 ⌃': 'Collapse files ⌃', '已处理': 'Processed in', '(无标题)': '(untitled)',
   '暂无对话': 'No chats yet', '没有匹配的会话': 'No matching sessions', '搜索失败：': 'Search failed: ',
@@ -838,6 +839,37 @@ function renderAttachBar() {
   bar.textContent = '';
   bar.classList.toggle('hidden', !state.attachments.length);
   state.attachments.forEach((a, idx) => {
+    // 长文本粘贴附件：图标 + 首行预览 + 展开回输入框
+    if (a.kind === 'text') {
+      const chip = el('div', 'attach-chip attach-text');
+      chip.appendChild(el('span', 'attach-text-ico', '📄'));
+      const body = el('div', 'attach-text-body');
+      body.appendChild(el('div', 'attach-text-name', a.name));
+      const expand = el('button', 'attach-text-expand', t('在文本框中显示') + ' ›');
+      expand.type = 'button';
+      expand.addEventListener('click', () => {
+        promptInput.value = (promptInput.value ? promptInput.value + '\n' : '') + a.text;
+        state.attachments.splice(idx, 1);
+        renderAttachBar();
+        autoGrow();
+        promptInput.focus();
+      });
+      body.appendChild(expand);
+      chip.appendChild(body);
+      const x = el('button', 'attach-x', '×');
+      x.type = 'button';
+      x.title = t('移除');
+      x.addEventListener('click', () => {
+        state.attachments.splice(idx, 1);
+        renderAttachBar();
+      });
+      chip.appendChild(x);
+      chip.title =
+        (CUR_LANG === 'en' ? 'Pasted text, ' : '粘贴文本，') +
+        a.text.length + (CUR_LANG === 'en' ? ' chars' : ' 字');
+      bar.appendChild(chip);
+      return;
+    }
     const chip = el('div', 'attach-chip');
     const img = el('img', 'attach-thumb');
     img.src = '/api/file?path=' + encodeURIComponent(a.path);
@@ -3168,11 +3200,12 @@ async function onSend() {
       showComposerError(t('请先选择项目目录（输入卡片下方的项目选择器）'));
       return;
     }
+    const firstTxtAtt = atts.find((a) => a.kind === 'text');
     state.session = {
       agent: state.agent,
       id: null,
       project: state.project,
-      title: snippet(text || '[图片]', 40),
+      title: snippet(text || (firstTxtAtt ? firstTxtAtt.name : '[图片]'), 40),
     };
     showChat();
     chatMsgs.textContent = '';
@@ -3184,7 +3217,15 @@ async function onSend() {
   autoGrow();
   state.attachments = [];
   renderAttachBar();
-  appendUserBubble(chatMsgs, text, atts.map((a) => imageEl(a.path)));
+  const imgAtts = atts.filter((a) => a.kind !== 'text');
+  const txtAtts = atts.filter((a) => a.kind === 'text');
+  // 气泡里长文本附件只显示摘要行（完整内容仍随 prompt 发送并落盘）
+  const bubbleText =
+    text +
+    txtAtts
+      .map((a) => '\n📄 ' + a.name + (CUR_LANG === 'en' ? ` (${a.text.length} chars)` : `（${a.text.length} 字）`))
+      .join('');
+  appendUserBubble(chatMsgs, bubbleText.trim(), imgAtts.map((a) => imageEl(a.path)));
   scrollChat();
   beginAssistant();
   if (sageInfo) {
@@ -3192,9 +3233,12 @@ async function onSend() {
     stream.ctx.bodyEl.appendChild(cursorEl);
   }
 
-  // 附件图片以本地路径写入 prompt，由 CLI 的图片查看/Read 工具读取
+  // 长文本附件展开进 prompt；图片以本地路径写入，由 CLI 的图片查看/Read 工具读取
   let finalPrompt = text;
-  for (const a of atts) {
+  for (const a of txtAtts) {
+    finalPrompt += (finalPrompt ? '\n\n' : '') + a.text;
+  }
+  for (const a of imgAtts) {
     finalPrompt += (finalPrompt ? '\n\n' : '') + '请查看图片文件: ' + a.path;
   }
 
@@ -3370,16 +3414,29 @@ function bindEvents() {
     const hl = $('#prompt-hl');
     if (hl) hl.scrollTop = promptInput.scrollTop;
   });
-  // 粘贴图片 → 上传为附件
+  // 粘贴图片 → 上传为附件；粘贴超长文本 → 折叠为文本附件卡（不灌进输入框）
   promptInput.addEventListener('paste', (e) => {
     const items = e.clipboardData && e.clipboardData.items;
-    if (!items) return;
-    for (const it of items) {
-      if (it.type && it.type.startsWith('image/')) {
-        e.preventDefault();
-        const f = it.getAsFile();
-        if (f) addAttachment(f);
+    if (items) {
+      for (const it of items) {
+        if (it.type && it.type.startsWith('image/')) {
+          e.preventDefault();
+          const f = it.getAsFile();
+          if (f) addAttachment(f);
+          return;
+        }
       }
+    }
+    const txt = e.clipboardData ? e.clipboardData.getData('text/plain') : '';
+    if (txt && (txt.length > 800 || txt.split('\n').length > 10)) {
+      e.preventDefault();
+      const first = (txt.trim().split('\n')[0] || '').trim();
+      state.attachments.push({
+        kind: 'text',
+        text: txt,
+        name: snippet(first || (CUR_LANG === 'en' ? 'Pasted text' : '粘贴文本'), 26),
+      });
+      renderAttachBar();
     }
   });
   $('#attach-btn').addEventListener('click', () => $('#file-input').click());

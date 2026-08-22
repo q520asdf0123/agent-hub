@@ -831,6 +831,34 @@ button { font-family: inherit; }
   background: var(--panel);
 }
 .attach-thumb { display: block; width: 72px; height: 54px; object-fit: cover; }
+
+/* 长文本粘贴附件卡：图标 + 首行预览 + 展开链接 */
+.attach-chip.attach-text {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 28px 8px 10px;
+  max-width: 250px;
+}
+.attach-text-ico { font-size: 16px; flex: none; }
+.attach-text-body { min-width: 0; }
+.attach-text-name {
+  font-size: 12px;
+  color: var(--fg2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: Consolas, "Cascadia Mono", monospace;
+}
+.attach-text-expand {
+  border: none;
+  background: none;
+  padding: 0;
+  font-size: 11px;
+  color: var(--dim);
+  cursor: pointer;
+}
+.attach-text-expand:hover { color: var(--accent2); }
 .attach-x {
   position: absolute;
   top: 2px;
