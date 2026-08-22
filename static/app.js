@@ -3149,8 +3149,9 @@ async function stitchCollab(s, tr) {
           ? (CUR_LANG === 'en' ? '🤝 Division of work · ' : '🤝 分工执行 · ') +
             ln.label + (ln.cats ? '（' + ln.cats + '）' : '')
           : (CUR_LANG === 'en' ? '🤝 Collaborative review · ' : '🤝 协作复查 · ') + ln.label;
+      // 默认收起：只展示入口分隔线（子会话内容不内联铺开），点击直达子会话
       const secDiv = renderDivider(
-        title + (CUR_LANG === 'en' ? ' · click to open sub-session' : ' · 点击打开子会话可追问')
+        title + (CUR_LANG === 'en' ? ' · click to enter sub-session' : ' · 点击进入子会话')
       );
       secDiv.classList.add('collab-jump');
       const pk = ln.partner;
@@ -3159,12 +3160,6 @@ async function stitchCollab(s, tr) {
         openSession({ agent: pk.slice(0, j), id: pk.slice(j + 1), project: s.project, title: '' });
       });
       sec.appendChild(secDiv);
-      const inner = el('div');
-      renderTranscript(inner, tr);
-      // 子会话首条注入任务书与主会话内容重复 → 缝合视图里去掉
-      const firstInject = inner.querySelector('.collab-inject');
-      if (firstInject) firstInject.remove();
-      sec.appendChild(inner);
       // 插到对应的回注卡之前（时间序一一对应；找不到则追加到末尾）
       const anchors = [...chatMsgs.querySelectorAll('.collab-inject')].filter((c) =>
         /分工产出回注|复查意见回注|Consolidated partner output|Review feedback/.test(c.textContent || '')
