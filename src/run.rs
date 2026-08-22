@@ -207,6 +207,19 @@ pub async fn stream_chat(registry: &RunRegistry, req: ChatReq) -> Response {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // 记忆代理接入在 build_args 内完成：claude 经 --settings env，
+    // codex 经 -c 内联 provider。此处只负责「开了记忆但配置不足」的提示。
+    let mem_note: Option<&str> = if req.memory.unwrap_or(false) {
+        match memory_proxy_conf() {
+            None => Some("记忆代理未配置（~/.agenthub/memory.json），本次直连"),
+            Some(c) if req.agent == "codex" && (c.team.is_none() || c.agent.is_none()) => {
+                Some("codex 记忆需绑定 Team/Agent（面板创建后配置 memory.json），本次直连")
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -246,6 +259,9 @@ pub async fn stream_chat(registry: &RunRegistry, req: ChatReq) -> Response {
         outcome: Mutex::new(None),
     });
     registry.insert(run_id.clone(), rs.clone());
+    if let Some(note) = mem_note {
+        rs.push(&json!({"t": "status", "text": note}));
+    }
 
     // 泵任务：拥有子进程，独立于任何 HTTP 连接存活；只有 kill 信号才杀进程。
     let agent = req.agent.clone();
@@ -419,6 +435,70 @@ const CODEX_INIT_PROMPT: &str = "请分析当前代码库，创建（或更新�
 包含项目概述、构建/测试/运行命令、目录结构、代码风格约定和其他对编码 agent 有用的注意事项。\
 内容要精炼、可执行，基于仓库实际情况，不要编造。";
 
+/// 记忆代理配置（~/.agenthub/memory.json）。
+/// {"proxy":"http://...","key":"sk-mem-...","team":"...","agent":"...","task":"..."}
+/// team/agent/task 可选：配齐后经 headerAutoSelect 静默绑定团队资产
+///（省去交互式选择器；codex 无它则首轮会被门控提示占用，故必需）。
+struct MemConf {
+    proxy: String,
+    key: String,
+    team: Option<String>,
+    agent: Option<String>,
+    task: Option<String>,
+}
+
+fn memory_proxy_conf() -> Option<MemConf> {
+    let p = dirs::home_dir()?.join(".agenthub").join("memory.json");
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()?;
+    let s = |k: &str| {
+        v.get(k)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|x| !x.is_empty())
+            .map(String::from)
+    };
+    let proxy = s("proxy")?.trim_end_matches('/').to_string();
+    let key = s("key")?;
+    Some(MemConf {
+        proxy,
+        key,
+        team: s("team"),
+        agent: s("agent"),
+        task: s("task"),
+    })
+}
+
+/// codex 记忆接入：-c 内联定义指向 TDAI proxy 的 model_provider（不动全局配置）。
+/// 仅在 team+agent 已配置时启用——headless 过不了交互门控，头部自动绑定是前提。
+fn push_memory_provider(args: &mut Vec<String>, req: &ChatReq) {
+    if req.agent != "codex" || !req.memory.unwrap_or(false) {
+        return;
+    }
+    let Some(c) = memory_proxy_conf() else { return };
+    let (Some(team), Some(agent)) = (c.team.as_deref(), c.agent.as_deref()) else {
+        return; // 未绑定团队资产 → 直连（spawn 处会发提示事件）
+    };
+    let (proxy, key) = (&c.proxy, &c.key);
+    let mut kvs = vec![
+        "model_provider=\"tdai-memory\"".to_string(),
+        "model_providers.tdai-memory.name=\"TDAI Memory\"".to_string(),
+        "model_providers.tdai-memory.wire_api=\"responses\"".to_string(),
+        format!("model_providers.tdai-memory.base_url=\"{proxy}/codex/default\""),
+        format!("model_providers.tdai-memory.experimental_bearer_token=\"{key}\""),
+        format!("model_providers.tdai-memory.http_headers.\"x-team-id\"=\"{team}\""),
+        format!("model_providers.tdai-memory.http_headers.\"x-agent-id\"=\"{agent}\""),
+    ];
+    if let Some(task) = c.task.as_deref() {
+        kvs.push(format!(
+            "model_providers.tdai-memory.http_headers.\"x-task-id\"=\"{task}\""
+        ));
+    }
+    for kv in kvs {
+        args.push("-c".to_string());
+        args.push(kv);
+    }
+}
+
 /// codex 快速档：service_tier（TUI 的 /fast 持久化的同一官方配置键；
 /// on→fast / off→standard，显式两态覆盖全局默认，让界面开关所见即所得）。
 fn push_service_tier(args: &mut Vec<String>, req: &ChatReq) {
@@ -459,6 +539,7 @@ fn build_args(req: &ChatReq) -> (Vec<String>, String) {
                 args.push(format!("model_reasoning_effort=\"{}\"", e.trim()));
             }
             push_service_tier(&mut args, req);
+            push_memory_provider(&mut args, req);
             if let Some(m) = req.model.as_deref().filter(|m| !m.trim().is_empty()) {
                 args.push("-c".to_string());
                 args.push(format!("model=\"{}\"", m.trim()));
@@ -523,6 +604,34 @@ fn build_args(req: &ChatReq) -> (Vec<String>, String) {
                 serde_json::Value::String(e.trim().to_string()),
             );
         }
+        // 记忆代理：经 --settings 的 env 按次切换 base_url。
+        // 实测进程环境变量会被全局 settings.json 的 env 覆盖，唯有命令行
+        // --settings 的优先级高于全局文件，故必须走这里。
+        if req.memory.unwrap_or(false) {
+            if let Some(c) = memory_proxy_conf() {
+                let mut env = serde_json::Map::new();
+                env.insert(
+                    "ANTHROPIC_BASE_URL".to_string(),
+                    serde_json::Value::String(format!("{}/claude-code/default", c.proxy)),
+                );
+                env.insert(
+                    "ANTHROPIC_AUTH_TOKEN".to_string(),
+                    serde_json::Value::String(c.key.clone()),
+                );
+                // 团队资产头部自动绑定（配齐 team/agent 后免交互选择器）
+                if let (Some(team), Some(agent)) = (c.team.as_deref(), c.agent.as_deref()) {
+                    let mut h = format!("x-team-id: {team}\nx-agent-id: {agent}");
+                    if let Some(task) = c.task.as_deref() {
+                        h.push_str(&format!("\nx-task-id: {task}"));
+                    }
+                    env.insert(
+                        "ANTHROPIC_CUSTOM_HEADERS".to_string(),
+                        serde_json::Value::String(h),
+                    );
+                }
+                settings.insert("env".to_string(), serde_json::Value::Object(env));
+            }
+        }
         if !settings.is_empty() {
             args.push("--settings".to_string());
             args.push(serde_json::Value::Object(settings).to_string());
@@ -554,6 +663,7 @@ fn build_args(req: &ChatReq) -> (Vec<String>, String) {
                         args.push(format!("model_reasoning_effort=\"{}\"", e.trim()));
                     }
                     push_service_tier(&mut args, req);
+            push_memory_provider(&mut args, req);
                     if let Some(m) = req.model.as_deref().filter(|m| !m.trim().is_empty()) {
                         args.push("-m".to_string());
                         args.push(m.to_string());
@@ -576,6 +686,7 @@ fn build_args(req: &ChatReq) -> (Vec<String>, String) {
                     args.push(format!("model_reasoning_effort=\"{}\"", e.trim()));
                 }
                 push_service_tier(&mut args, req);
+            push_memory_provider(&mut args, req);
                 if req.permission.as_deref() == Some("bypass") {
                     args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
                 }
@@ -590,6 +701,7 @@ fn build_args(req: &ChatReq) -> (Vec<String>, String) {
                     args.push(format!("model_reasoning_effort=\"{}\"", e.trim()));
                 }
                 push_service_tier(&mut args, req);
+            push_memory_provider(&mut args, req);
                 args.push("-C".to_string());
                 args.push(req.project.clone());
                 if let Some(m) = req.model.as_deref().filter(|m| !m.trim().is_empty()) {
@@ -1012,11 +1124,15 @@ fn codex_map_item(item: &Value, st: &mut MapState) -> Vec<Value> {
             }
         }
         "error" => {
-            if st.error.is_none() {
-                let msg = item
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("CLI 报告错误");
+            let msg = item
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("CLI 报告错误");
+            // codex 把「配置项不适用、已自动省略」类告警也走 error 事件
+            //（如 service_tier=standard 对仅声明 fast 的模型），任务本身
+            // 照常执行——这类不算失败。
+            let benign = msg.contains("will be omitted");
+            if st.error.is_none() && !benign {
                 st.error = Some(truncate_chars(msg, SUMMARY_MAX));
             }
         }

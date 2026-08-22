@@ -417,7 +417,10 @@ pub fn transcript(project: &str, session_id: &str) -> Result<Transcript, String>
             if msg.get("model").and_then(Value::as_str) == Some("<synthetic>") {
                 return true;
             }
-            // 整场用量累计（context = 最后一次调用的完整 prompt 规模）
+            // 整场用量累计（context = 最后一次调用的完整 prompt 规模）。
+            // 子链（subagent）调用的 ctx/model 不代表主对话——总量照计，
+            // 但不得覆盖上下文与模型，否则刷新时占比在主/子链间跳变。
+            let sidechain = v.get("isSidechain").and_then(Value::as_bool).unwrap_or(false);
             if let Some(u) = msg.get("usage") {
                 let g = |k: &str| u.get(k).and_then(Value::as_i64).unwrap_or(0);
                 let (i, cr, cw) = (
@@ -429,12 +432,14 @@ pub fn transcript(project: &str, session_id: &str) -> Result<Transcript, String>
                 u_cr += cr;
                 u_cw += cw;
                 u_out += g("output_tokens");
-                if i + cr + cw > 0 {
+                if !sidechain && i + cr + cw > 0 {
                     u_ctx = i + cr + cw;
                 }
             }
-            if let Some(m) = msg.get("model").and_then(Value::as_str) {
-                last_model = Some(m.to_string());
+            if !sidechain {
+                if let Some(m) = msg.get("model").and_then(Value::as_str) {
+                    last_model = Some(m.to_string());
+                }
             }
             assistant_blocks(msg.get("content"))
         };

@@ -9,6 +9,7 @@ let CUR_LANG = 'zh';
 const I18N_EN = {
   '搜索会话': 'Search sessions', '新建会话': 'New session', '项目': 'Projects', '对话': 'Chats',
   '在文本框中显示': 'Show in input', '移除': 'Remove', '点击展开 / 收起': 'Click to expand / collapse',
+  '🧠 记忆': '🧠 Memory',
   '搜索结果': 'Results', '技能': 'Skills', '图片': 'Image', '本地': 'Local', '收起': 'Collapse',
   '收起文件 ⌃': 'Collapse files ⌃', '已处理': 'Processed in', '(无标题)': '(untitled)',
   '暂无对话': 'No chats yet', '没有匹配的会话': 'No matching sessions', '搜索失败：': 'Search failed: ',
@@ -589,6 +590,7 @@ const state = {
   sageOn: localStorage.getItem('ah-sage') === '1',            // SAGE 智能路由开关
   sageFailed: null,       // 失败重路由记忆 {task, agents:[]}（成功后清空）
   pendingSage: null,      // 待持久化的路由决策（init 拿到会话 id 即存）
+  memOn: localStorage.getItem('ah-mem') === '1',              // TDAI 记忆代理开关
   projOrder: (() => {
     try { return JSON.parse(localStorage.getItem('ah-proj-order')) || []; }
     catch (_) { return []; }
@@ -1515,6 +1517,12 @@ function syncAgentUI() {
   setToggleChip(sageBtn, t('🧭 智能路由'), state.sageOn);
   // 快速开关（两家都是真实机制，与思考等级相互独立）：
   // claude = --settings fastMode；codex = -c service_tier（TUI /fast 同款配置键）
+  // TDAI 团队记忆：按次经代理注入/沉淀（两家 CLI 都支持）
+  const memBtn = $('#mem-btn');
+  if (memBtn) {
+    memBtn.classList.toggle('on', state.memOn);
+    setToggleChip(memBtn, t('🧠 记忆'), state.memOn);
+  }
   const fastBtn = $('#fast-btn');
   fastBtn.classList.remove('hidden');
   fastBtn.classList.toggle('on', state.fast);
@@ -2950,6 +2958,7 @@ async function runCollabReview(collab, primaryText) {
     permission: collab.partner === 'codex' ? 'read-only' : 'default',
     effort: null,
     fast: false,
+    memory: state.memOn,
   };
   state.streaming = true;
   state.runId = null;
@@ -3058,6 +3067,7 @@ async function runCollabPipeline(collab, primaryText, meta) {
     permission: state.permission,
     effort: null,
     fast: false,
+    memory: state.memOn,
   };
   state.streaming = true;
   state.runId = null;
@@ -3168,6 +3178,7 @@ async function runPrimaryFollowup(primarySess, dividerText, prompt) {
     permission: state.permission,
     effort: null,
     fast: false,
+    memory: state.memOn,
   };
   state.streaming = true;
   state.runId = null;
@@ -3300,6 +3311,7 @@ async function onSend() {
     permission: state.permission,
     effort: state.effort,
     fast: state.fast, // claude=fastMode；codex=service_tier fast/standard
+    memory: state.memOn,
   };
   state.streaming = true;
   state.runId = null;
@@ -3533,6 +3545,13 @@ function bindEvents() {
   $('#sage-btn').addEventListener('click', () => {
     state.sageOn = !state.sageOn;
     localStorage.setItem('ah-sage', state.sageOn ? '1' : '0');
+    syncAgentUI();
+  });
+
+  // TDAI 团队记忆开关
+  $('#mem-btn').addEventListener('click', () => {
+    state.memOn = !state.memOn;
+    localStorage.setItem('ah-mem', state.memOn ? '1' : '0');
     syncAgentUI();
   });
 
@@ -3795,6 +3814,11 @@ function init() {
     .then((all) => {
       state.modelsInfo = all;
       syncAgentUI();
+      // 模型窗口表就位后重渲染用量条——修：刷新后转录先渲染时查不到
+      // 每模型窗口，按 200k 误算占比，表到位后又按 1M 算，来回跳变
+      if (!stream && state.histUsage && state.session) {
+        renderUsageFromHistory(state.histUsage, state.session.agent);
+      }
     })
     .catch(() => {});
 }

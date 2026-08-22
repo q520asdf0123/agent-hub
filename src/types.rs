@@ -92,6 +92,8 @@ pub struct ChatReq {
     /// 快速模式：claude 注入 --settings {"fastMode":true}；
     /// codex 传 -c service_tier="fast"/"standard"（None 则不传，随全局默认）
     pub fast: Option<bool>,
+    /// 记忆：本次运行经 TDAI 记忆代理（~/.agenthub/memory.json 配置；缺失则直连）
+    pub memory: Option<bool>,
     /// 思考等级：claude 经 --settings effortLevel；codex 经 -c model_reasoning_effort
     pub effort: Option<String>,
 }
