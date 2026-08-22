@@ -124,6 +124,10 @@ pub struct SageOutcomeReq {
     pub success: f64,
     pub actual_cost: Option<f64>,
     pub actual_latency_ms: Option<f64>,
+    /// 分工模式：agent id → 0..1
+    pub agent_scores: Option<serde_json::Value>,
+    /// 分工模式：需求名 → 0..1
+    pub requirement_scores: Option<serde_json::Value>,
 }
 
 pub async fn sage_outcome(Json(body): Json<SageOutcomeReq>) -> Response {
@@ -132,6 +136,8 @@ pub async fn sage_outcome(Json(body): Json<SageOutcomeReq>) -> Response {
         body.success,
         body.actual_cost,
         body.actual_latency_ms,
+        body.agent_scores,
+        body.requirement_scores,
     )
     .await
     {

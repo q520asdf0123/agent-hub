@@ -49,11 +49,14 @@ pub async fn route(prompt: &str, incumbent: &str, failed: &[String]) -> Result<V
 }
 
 /// 执行结束后回喂证据（record_outcome），驱动 SAGE 的在线学习闭环。
+/// 分工模式可附带按 agent / 按需求的细粒度评分。
 pub async fn outcome(
     decision_blob: Value,
     success: f64,
     actual_cost: Option<f64>,
     actual_latency_ms: Option<f64>,
+    agent_scores: Option<Value>,
+    requirement_scores: Option<Value>,
 ) -> Result<Value, String> {
     call(json!({
         "cmd": "outcome",
@@ -61,6 +64,8 @@ pub async fn outcome(
         "success": success,
         "actual_cost": actual_cost,
         "actual_latency_ms": actual_latency_ms,
+        "agent_scores": agent_scores,
+        "requirement_scores": requirement_scores,
     }))
     .await
 }

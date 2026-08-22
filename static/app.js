@@ -50,6 +50,7 @@ const I18N_EN = {
   '🧭 SAGE 路由': '🧭 SAGE routing', '继续当前': 'Stay', '移交': 'Handoff', '协作': 'Collaborate',
   '需求推断：': 'Inferred needs: ', '协作：完成后由 ': 'Collaborate: reviewed by ',
   ' 复查，结论回注收尾': ', findings fed back to wrap up',
+  '协作分工：': 'Division of work: ', '，完成后回注汇总': ', output consolidated back afterwards',
   '成功率 ': 'Success ', ' · 覆盖 ': ' · Coverage ', ' · 效用 ': ' · Utility ',
   '点击查看差异 · 右键更多操作': 'Click for diff · right-click for more', '缓存': 'Cache', '上下文': 'Context', '点击放大': 'Click to zoom',
   '刚刚': 'just now', '跟随浏览器': 'Follow browser', '选择项目…': 'Pick a project…',
@@ -2719,7 +2720,15 @@ function sageCard(d) {
   if (reqs) lines.push(t('需求推断：') + reqs);
   if (d.partner) {
     const p = AGENTS[d.partner] ? AGENTS[d.partner].label : d.partner;
-    lines.push(t('协作：完成后由 ') + p + t(' 复查，结论回注收尾'));
+    const cats = Object.entries(d.assignments || {})
+      .filter(([, a]) => a === d.partner)
+      .map(([r]) => r);
+    const w = cats.reduce((s, r) => s + ((d.requirements || {})[r] || 0), 0);
+    lines.push(
+      w >= 0.25
+        ? t('协作分工：') + p + '（' + cats.join('、') + '）' + t('，完成后回注汇总')
+        : t('协作：完成后由 ') + p + t(' 复查，结论回注收尾')
+    );
   }
   lines.push(
     t('成功率 ') + d.success_probability + t(' · 覆盖 ') + d.coverage + t(' · 效用 ') + d.utility
@@ -2825,25 +2834,157 @@ async function runCollabReview(collab, primaryText) {
     state.session.id === primarySess.id &&
     state.session.agent === primarySess.agent
   ) {
-    await runCollabFeedback(primarySess, partnerLabel, reviewFinal);
+    await runPrimaryFollowup(
+      primarySess,
+      (CUR_LANG === 'en' ? '🤝 Feedback · ' : '🤝 复查回注 · ') + primaryLabel +
+        (CUR_LANG === 'en' ? ' wraps up' : ' 收尾'),
+      '【协作复查回注】搭档 agent（' + partnerLabel + '）对你上一轮工作的只读复查意见如下：\n\n' +
+        reviewFinal +
+        '\n\n请核对以上意见：确认无误的部分简要说明；确有问题的部分直接修正并说明改动。'
+    );
   }
 }
 
-/** 协作第三步：子代理复查结论交还主 agent，在主会话内续跑一轮收尾 */
-async function runCollabFeedback(primarySess, partnerLabel, reviewText) {
+/** 分工流水线（库原生 COLLABORATE 语义）：搭档执行其名下需求 → 产出回注主会话汇总。
+ *  结束后统一回喂 outcome（整体按需求权重加权，附按 agent / 按需求评分）。 */
+async function runCollabPipeline(collab, primaryText, meta) {
+  if (!state.session || !primaryText.trim()) return;
+  const primarySess = {
+    agent: state.session.agent,
+    id: state.session.id,
+    project: state.session.project,
+  };
+  const partnerLabel = AGENTS[collab.partner].label;
   const primaryLabel = AGENTS[primarySess.agent]
     ? AGENTS[primarySess.agent].label
     : primarySess.agent;
+  const cats = Object.entries(collab.assignments)
+    .filter(([, a]) => a === collab.partner)
+    .map(([r]) => r);
+  const stageStart = Date.now();
   chatMsgs.appendChild(
     renderDivider(
-      (CUR_LANG === 'en' ? '🤝 Feedback · ' : '🤝 复查回注 · ') + primaryLabel +
-      (CUR_LANG === 'en' ? ' wraps up' : ' 收尾')
+      (CUR_LANG === 'en' ? '🤝 Division of work · ' : '🤝 分工执行 · ') +
+        partnerLabel + '（' + cats.join('、') + '）'
     )
   );
+  scrollChat();
+  const savedHist = state.histUsage;
+  state.histUsage = null; // 分工段是独立新会话，不继承用量基线
+  beginAssistant();
+  state.histUsage = savedHist;
   const prompt =
-    '【协作复查回注】搭档 agent（' + partnerLabel + '）对你上一轮工作的只读复查意见如下：\n\n' +
-    reviewText +
-    '\n\n请核对以上意见：确认无误的部分简要说明；确有问题的部分直接修正并说明改动。';
+    '【协作分工】路由已按需求把本任务分工，你负责：' + cats.join('、') + '。\n\n' +
+    '原任务：\n' + collab.task + '\n\n' +
+    '主执行者（' + primaryLabel + '）已完成其负责的部分，产出如下：\n' + primaryText + '\n\n' +
+    '请基于以上产出完成你负责的部分（可创建或修改相应文件），最后给出简明的产出说明。';
+  const req = {
+    agent: collab.partner,
+    project: primarySess.project,
+    prompt,
+    session_id: null,
+    model: null,
+    permission: state.permission,
+    effort: null,
+    fast: false,
+  };
+  state.streaming = true;
+  state.runId = null;
+  setSendButton(true);
+  const ac = new AbortController();
+  state.abort = ac;
+  // 守卫：分工段是独立会话，不接管当前会话 id
+  const guard = (ev) => {
+    if (!ev) return;
+    if (ev.t === 'init') return;
+    if (ev.t === 'done') {
+      if (stream) {
+        flushFilesCard(stream.ctx);
+        if (!ev.ok) {
+          stream.ctx.bodyEl.appendChild(
+            el('div', 'error-bar', ev.error || t('运行失败（无错误信息）'))
+          );
+        } else if (Date.now() - stream.startedAt > 3000) {
+          stream.ctx.bodyEl.appendChild(
+            el('div', 'done-line', t('已处理') + ' ' + fmtDuration(Date.now() - stream.startedAt))
+          );
+        }
+      }
+      return;
+    }
+    handleEvent(ev);
+  };
+  let partnerFinal = '';
+  let partnerOk = false;
+  let partnerOut = 0;
+  try {
+    await streamChat(req, guard, ac.signal);
+  } catch (e) {
+    if (stream && e && e.name !== 'AbortError') {
+      stream.ctx.bodyEl.appendChild(el('div', 'error-bar', t('请求失败：') + (e.message || e)));
+    }
+  } finally {
+    if (stream) {
+      partnerFinal = stream.finalText || '';
+      partnerOk = !!stream.doneOk;
+      partnerOut = (stream.usage && stream.usage.output) || 0;
+    }
+    finalizeStream();
+    state.streaming = false;
+    state.abort = null;
+    state.runId = null;
+    setSendButton(false);
+    loadConvs(); // 分工会话已落盘
+  }
+  // 统一回喂：整体成功按需求权重加权；附按 agent / 按需求评分（库的证据粒度）
+  if (meta && meta.blob) {
+    const reqW = collab.requirements || {};
+    const requirement_scores = {};
+    let total = 0;
+    let got = 0;
+    for (const [r, a] of Object.entries(collab.assignments)) {
+      const w = reqW[r] || 0;
+      const ok = a === collab.partner ? (partnerOk ? 1 : 0) : 1; // 走到这里说明主执行已成功
+      requirement_scores[r] = ok;
+      total += w;
+      got += w * ok;
+    }
+    const agent_scores = {};
+    agent_scores[meta.primaryAgent] = 1;
+    agent_scores[collab.partner] = partnerOk ? 1 : 0;
+    api
+      .post('/api/sage/outcome', {
+        decision_blob: meta.blob,
+        success: total > 0 ? got / total : partnerOk ? 1 : 0.5,
+        actual_cost: Math.min(1, ((meta.primaryOut || 0) + partnerOut) / 100000),
+        actual_latency_ms: (meta.primaryMs || 0) + (Date.now() - stageStart),
+        agent_scores,
+        requirement_scores,
+      })
+      .catch(() => {});
+  }
+  // 汇总回注：搭档产出交还主 agent 整合收尾
+  if (
+    partnerOk &&
+    partnerFinal.trim() &&
+    state.session &&
+    state.session.id === primarySess.id &&
+    state.session.agent === primarySess.agent
+  ) {
+    await runPrimaryFollowup(
+      primarySess,
+      (CUR_LANG === 'en' ? '🤝 Consolidate · ' : '🤝 汇总回注 · ') + primaryLabel +
+        (CUR_LANG === 'en' ? ' wraps up' : ' 收尾'),
+      '【协作汇总】搭档 agent（' + partnerLabel + '）已完成其分工（' + cats.join('、') + '），产出如下：\n\n' +
+        partnerFinal +
+        '\n\n请核对搭档产出与你的实现是否一致：有出入的直接修正，并给出本次任务的最终总结。'
+    );
+  }
+}
+
+/** 协作收尾通用段：把文本以消息回注主会话，由主 agent 续跑一轮 */
+async function runPrimaryFollowup(primarySess, dividerText, prompt) {
+  chatMsgs.appendChild(renderDivider(dividerText));
   appendUserBubble(chatMsgs, prompt, []);
   scrollChat();
   beginAssistant();
@@ -2981,10 +3122,15 @@ async function onSend() {
   setSendButton(true);
   const ac = new AbortController();
   state.abort = ac;
-  // 协作复查条件：路由给出了搭档（新会话首轮才有 sageInfo）
+  // 协作条件：路由给出了搭档（新会话首轮才有 sageInfo）
   const collab =
     sageInfo && sageInfo.partner && AGENTS[sageInfo.partner]
-      ? { partner: sageInfo.partner, task: text }
+      ? {
+          partner: sageInfo.partner,
+          task: text,
+          assignments: sageInfo.assignments || {},
+          requirements: sageInfo.requirements || {},
+        }
       : null;
   let primaryFinal = '';
   let primaryOk = false;
@@ -3021,16 +3167,15 @@ async function onSend() {
     loadConvs();
     loadProjects();
   }
-  // SAGE 证据回喂：真实成败/耗时/成本交还路由器学习（断开查看≠失败，不回喂）
+  // 门控：搭档名下需求权重 ≥ 0.25 → 库原生的分工流水线；否则复查回注
+  const partnerWeight = collab
+    ? Object.entries(collab.assignments)
+        .filter(([, a]) => a === collab.partner)
+        .reduce((s, [r]) => s + (collab.requirements[r] || 0), 0)
+    : 0;
+  const usePipeline = !!(collab && partnerWeight >= 0.25);
+  // SAGE 证据回喂（断开查看≠失败，不回喂；流水线模式在全部阶段结束后统一回喂）
   if (sageInfo && sageInfo.decision_blob && !primaryAborted) {
-    api
-      .post('/api/sage/outcome', {
-        decision_blob: sageInfo.decision_blob,
-        success: primaryOk ? 1 : 0,
-        actual_cost: Math.min(1, primaryOut / 100000),
-        actual_latency_ms: primaryMs,
-      })
-      .catch(() => {});
     if (primaryOk) {
       state.sageFailed = null;
     } else {
@@ -3041,10 +3186,29 @@ async function onSend() {
       if (!f.agents.includes(req.agent)) f.agents.push(req.agent);
       state.sageFailed = f;
     }
+    if (!(usePipeline && primaryOk && state.session)) {
+      api
+        .post('/api/sage/outcome', {
+          decision_blob: sageInfo.decision_blob,
+          success: primaryOk ? 1 : 0,
+          actual_cost: Math.min(1, primaryOut / 100000),
+          actual_latency_ms: primaryMs,
+        })
+        .catch(() => {});
+    }
   }
-  // 主执行成功且有搭档 → 自动协作复查（用户仍停留在本会话时）
+  // 主执行成功且有搭档 → 分工流水线 或 复查回注（用户仍停留在本会话时）
   if (collab && primaryOk && state.session) {
-    await runCollabReview(collab, primaryFinal);
+    if (usePipeline) {
+      await runCollabPipeline(collab, primaryFinal, {
+        blob: sageInfo.decision_blob,
+        primaryAgent: state.session.agent,
+        primaryMs,
+        primaryOut,
+      });
+    } else {
+      await runCollabReview(collab, primaryFinal);
+    }
   }
 }
 

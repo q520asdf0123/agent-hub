@@ -266,8 +266,20 @@ def cmd_outcome(req, st):
     if not decision.agents:
         return {"ok": False, "error": "decision_blob 缺少 agents"}
     success = max(0.0, min(1.0, float(req.get("success", 0.0))))
+    clip = lambda v: max(0.0, min(1.0, float(v)))  # noqa: E731
+    # 分工模式（COLLABORATE 流水线）：按 agent / 按需求打分，过滤到决策范围内
+    agent_scores = {
+        a: clip(v) for a, v in (req.get("agent_scores") or {}).items()
+        if a in decision.agents
+    }
+    requirement_scores = {
+        r: clip(v) for r, v in (req.get("requirement_scores") or {}).items()
+        if r in decision.assignments
+    }
     outcome = ExecutionOutcome(
         success=success,
+        agent_scores=agent_scores,
+        requirement_scores=requirement_scores,
         actual_cost=req.get("actual_cost"),
         actual_latency_ms=req.get("actual_latency_ms"),
     )
