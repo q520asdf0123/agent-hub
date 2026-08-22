@@ -588,6 +588,7 @@ const state = {
   agentFilter: localStorage.getItem('ah-agent-filter') || '', // ''=全部 | claude | codex
   sageOn: localStorage.getItem('ah-sage') === '1',            // SAGE 智能路由开关
   sageFailed: null,       // 失败重路由记忆 {task, agents:[]}（成功后清空）
+  pendingSage: null,      // 待持久化的路由决策（init 拿到会话 id 即存）
   projOrder: (() => {
     try { return JSON.parse(localStorage.getItem('ah-proj-order')) || []; }
     catch (_) { return []; }
@@ -2586,6 +2587,11 @@ function handleEvent(ev) {
         state.session.id = ev.session_id;
         prependConvRow();
       }
+      // 路由决策在拿到会话 id 的瞬间立即持久化——中途刷新页面也不丢
+      if (state.pendingSage && state.session && state.session.id) {
+        sageStoreSave(state.session.agent + ':' + state.session.id, state.pendingSage);
+        state.pendingSage = null;
+      }
       break;
     case 'delta':
       if (!ev.text) break; // 空增量不创建也不追加块（claude 回合开头会先发 text 为空串的 delta）
@@ -3231,6 +3237,7 @@ async function onSend() {
   if (sageInfo) {
     stream.ctx.bodyEl.appendChild(sageCard(sageInfo));
     stream.ctx.bodyEl.appendChild(cursorEl);
+    state.pendingSage = sageInfo; // init 事件一到（几秒内）就落盘，防中途刷新丢失
   }
 
   // 长文本附件展开进 prompt；图片以本地路径写入，由 CLI 的图片查看/Read 工具读取
@@ -3301,10 +3308,11 @@ async function onSend() {
     // 会话文件已落盘，刷新侧栏（列表与项目计数）
     loadConvs();
     loadProjects();
-    // 路由决策按会话持久化：刷新/重开会话后决策卡可重现
+    // 兜底：init 未触发保存时（极短运行等），结束时再存一次
     if (sageInfo && state.session && state.session.id) {
       sageStoreSave(state.session.agent + ':' + state.session.id, sageInfo);
     }
+    state.pendingSage = null;
   }
   // 门控：搭档名下需求权重 ≥ 0.25 → 库原生的分工流水线；否则复查回注
   const partnerWeight = collab
