@@ -413,8 +413,31 @@ pub fn transcript(project: &str, session_id: &str) -> Result<Transcript, String>
             }
             user_blocks(msg.get("content"))
         } else {
-            // API error 等合成行跳过
+            // API error 等合成行：正文是报错文本，标成错误分隔线（不映射会
+            // 导致报错在重开会话后"消失"）
             if msg.get("model").and_then(Value::as_str) == Some("<synthetic>") {
+                let err_text = msg
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|b| b.get("text").and_then(Value::as_str))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_default();
+                let trimmed = err_text.trim();
+                if !trimmed.is_empty() && trimmed != "No response requested." {
+                    messages.push(ChatMessage {
+                        role: "system".to_string(),
+                        ts: v.get("timestamp").and_then(Value::as_str).map(String::from),
+                        blocks: vec![Block {
+                            kind: "divider".to_string(),
+                            text: format!("⚠ 运行报错：{}", truncate_chars(trimmed, SUMMARY_MAX)),
+                            name: None,
+                        }],
+                    });
+                }
                 return true;
             }
             // 整场用量累计（context = 最后一次调用的完整 prompt 规模）。

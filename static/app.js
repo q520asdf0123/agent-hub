@@ -1023,10 +1023,11 @@ function toggleProject(path) {
 async function fillProjectSessions(box, path) {
   renderSkeleton(box, 2);
   try {
+    await ensureRunsIndex();
     const sessions = await api.get(
       '/api/sessions?' + new URLSearchParams({ project: path, limit: '500' })
     );
-    renderSessionList(box, sessions, path);
+    renderSessionList(box, mergeRunningSessions(sessions, path), path);
     const act = box.querySelector('.srow.active');
     if (act) act.scrollIntoView({ block: 'nearest' });
   } catch (e) {
@@ -1183,12 +1184,51 @@ function sessionRow(s) {
   return row;
 }
 
+/** 运行注册表兜底：刷新 runsIndex（列表合并运行中任务用，3 秒内不重复拉） */
+let runsIndexAt = 0;
+async function ensureRunsIndex() {
+  if (Date.now() - runsIndexAt < 3000) return;
+  try {
+    const runs = await api.get('/api/runs');
+    state.runsIndex = {};
+    for (const r of runs) {
+      if (r.session_id) state.runsIndex[r.session_id] = r;
+    }
+    runsIndexAt = Date.now();
+  } catch (_) {
+    /* 忽略 */
+  }
+}
+
+/** 会话列表合并运行中任务：新会话文件未落盘/未被索引时（claude 首轮长任务
+ *  尤其明显），列表会缺席几分钟——用注册表数据合成占位行，避免误以为没发出去 */
+function mergeRunningSessions(sessions, project) {
+  const have = new Set(sessions.map((s) => s.agent + ':' + s.id));
+  const extra = [];
+  for (const [sid, r] of Object.entries(state.runsIndex)) {
+    if (!r.running || !sid || !r.agent) continue;
+    if (project && clientNorm(r.project || '') !== clientNorm(project)) continue;
+    if (have.has(r.agent + ':' + sid)) continue;
+    extra.push({
+      agent: r.agent,
+      id: sid,
+      title: snippet(r.prompt || '(运行中)', 40),
+      project: r.project || '',
+      created: null,
+      updated: new Date().toISOString(),
+      archived: false,
+    });
+  }
+  return extra.concat(sessions);
+}
+
 async function loadConvs() {
   const listEl = $('#conv-list');
   if (!listEl.childElementCount) renderSkeleton(listEl, 4);
   try {
+    await ensureRunsIndex();
     const sessions = await api.get('/api/sessions?limit=30');
-    renderSessionList(listEl, sessions, 'convs');
+    renderSessionList(listEl, mergeRunningSessions(sessions, null), 'convs');
   } catch (e) {
     listEl.textContent = '';
     listEl.appendChild(errorRow(t('会话加载失败'), loadConvs));
@@ -2379,6 +2419,7 @@ async function openSession(s) {
     retry.type = 'button';
     retry.addEventListener('click', () => openSession(s));
     chatMsgs.appendChild(retry);
+    maybeAttachSessionRun(s); // 会话文件未落盘的运行中任务：转录取不到也接上实时流
   }
   promptInput.focus();
 }

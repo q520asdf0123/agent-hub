@@ -686,6 +686,26 @@ fn handle_event_msg(messages: &mut Vec<ChatMessage>, payload: &Value, ts: Option
                 }],
             });
         }
+        // 运行报错：error / turn_failed 事件，或 task_complete 携带错误消息
+        //（如额度 429）。不映射的话报错在重开会话后就"消失"了。
+        Some(t @ ("error" | "stream_error" | "turn_failed" | "task_complete")) => {
+            let msg = payload
+                .get("message")
+                .and_then(Value::as_str)
+                .filter(|s| !s.trim().is_empty());
+            let is_err = t != "task_complete" || payload.get("codex_error_info").is_some();
+            if let (Some(m), true) = (msg, is_err) {
+                messages.push(crate::types::ChatMessage {
+                    role: "system".to_string(),
+                    ts,
+                    blocks: vec![Block {
+                        kind: "divider".to_string(),
+                        text: format!("⚠ 运行报错：{}", truncate_chars(m, SUMMARY_MAX)),
+                        name: None,
+                    }],
+                });
+            }
+        }
         Some("item_completed") => {
             let Some(item) = payload.get("item") else {
                 return;
