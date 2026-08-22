@@ -2970,6 +2970,20 @@ async function discoverCollabLinks(s, tr, key) {
   return found;
 }
 
+/** 转录的最终回答文本（末条有实质内容的助手消息，补回注用） */
+function transcriptFinalText(tr) {
+  const asst = (tr.messages || []).filter((m) => m.role === 'assistant');
+  for (let i = asst.length - 1; i >= 0; i--) {
+    const txt = (asst[i].blocks || [])
+      .filter((b) => b.kind === 'text' && b.text)
+      .map((b) => b.text)
+      .join('\n')
+      .trim();
+    if (txt.length > 20) return txt.slice(0, 12000);
+  }
+  return '';
+}
+
 /** 打开会话时缝合协作关联：主会话内联子会话内容；子会话给出主会话入口 */
 async function stitchCollab(s, tr) {
   const key = s.agent + ':' + s.id;
@@ -3036,8 +3050,42 @@ async function stitchCollab(s, tr) {
         /分工产出回注|复查意见回注|Consolidated partner output|Review feedback/.test(c.textContent || '')
       );
       const anchor = anchors[links.indexOf(ln)] || null;
-      if (anchor && anchor.parentNode === chatMsgs) chatMsgs.insertBefore(sec, anchor);
-      else chatMsgs.appendChild(sec);
+      if (anchor && anchor.parentNode === chatMsgs) {
+        chatMsgs.insertBefore(sec, anchor);
+      } else {
+        chatMsgs.appendChild(sec);
+        // 无回注锚点 = 当时中途刷新，主 agent 没读过这份产出 → 提供补回注
+        const finalTxt = transcriptFinalText(tr);
+        if (finalTxt) {
+          const btn = el(
+            'button',
+            'btn-ghost collab-feed',
+            CUR_LANG === 'en'
+              ? '▶ Feed this back to the main agent to wrap up'
+              : '▶ 补回注：把该结论交给主 agent 收尾'
+          );
+          btn.type = 'button';
+          btn.addEventListener('click', async () => {
+            if (state.streaming) return;
+            btn.remove();
+            const primaryLabel = AGENTS[s.agent] ? AGENTS[s.agent].label : s.agent;
+            const prompt =
+              ln.kind === 'pipeline'
+                ? '【协作汇总】搭档 agent（' + ln.label + '）已完成其分工' +
+                  (ln.cats ? '（' + ln.cats + '）' : '') + '，产出如下：\n\n' + finalTxt +
+                  '\n\n请核对搭档产出与你的实现是否一致：有出入的直接修正，并给出本次任务的最终总结。'
+                : '【协作复查回注】搭档 agent（' + ln.label + '）对你上一轮工作的只读复查意见如下：\n\n' +
+                  finalTxt + '\n\n请核对以上意见：确认无误的部分简要说明；确有问题的部分直接修正并说明改动。';
+            await runPrimaryFollowup(
+              { agent: s.agent, id: s.id, project: s.project },
+              (CUR_LANG === 'en' ? '🤝 Consolidate · ' : '🤝 汇总回注 · ') + primaryLabel +
+                (CUR_LANG === 'en' ? ' wraps up' : ' 收尾'),
+              prompt
+            );
+          });
+          sec.appendChild(btn);
+        }
+      }
       scrollChat();
     } catch (_) {
       /* 子会话取不到（被删等）就跳过 */
