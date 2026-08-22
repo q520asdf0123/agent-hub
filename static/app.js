@@ -1410,7 +1410,13 @@ function loadAgentPrefs(agent) {
   state.permission = p.permission || 'bypass';
   state.model = p.model !== undefined ? p.model : null;
   state.effort = p.effort !== undefined ? p.effort : null;
-  state.fast = !!p.fast;
+  if (p.fast === undefined && agent === 'codex') {
+    // 未设置过：跟随 config.toml 的全局 service_tier（TUI /fast 持久化值）
+    const inf = state.modelsInfo && state.modelsInfo.codex;
+    state.fast = !!(inf && inf.service_tier === 'fast');
+  } else {
+    state.fast = !!p.fast;
+  }
 }
 
 function setAgent(agent) {
@@ -1474,18 +1480,16 @@ function syncAgentUI() {
   sageBtn.classList.toggle('hidden', !canSwitchAgent());
   sageBtn.classList.toggle('on', state.sageOn);
   sageBtn.textContent = state.sageOn ? t('🧭 智能路由·开') : t('🧭 智能路由');
+  // 快速开关（两家都是真实机制，与思考等级相互独立）：
+  // claude = --settings fastMode；codex = -c service_tier（TUI /fast 同款配置键）
   const fastBtn = $('#fast-btn');
   fastBtn.classList.remove('hidden');
-  if (currentAgent() === 'claude') {
-    fastBtn.classList.toggle('on', state.fast);
-    fastBtn.textContent = state.fast ? t('⚡ 快速·开') : t('⚡ 快速');
-    fastBtn.title = '快速模式：以 fastMode 设置运行（需模型支持）';
-  } else {
-    const on = state.effort === 'low';
-    fastBtn.classList.toggle('on', on);
-    fastBtn.textContent = on ? t('⚡ 快速·开') : t('⚡ 快速');
-    fastBtn.title = '快速：切换到低思考等级（Codex CLI 无速度档参数，low 即官方的快速响应档）';
-  }
+  fastBtn.classList.toggle('on', state.fast);
+  fastBtn.textContent = state.fast ? t('⚡ 快速·开') : t('⚡ 快速');
+  fastBtn.title =
+    currentAgent() === 'claude'
+      ? '快速模式：以 fastMode 设置运行（需模型支持）'
+      : '快速档：service_tier=fast（TUI /fast 同款，服务端优先处理，消耗更多额度）';
 }
 
 function setBadge(target, agent) {
@@ -3115,7 +3119,7 @@ async function onSend() {
     model: state.model,
     permission: state.permission,
     effort: state.effort,
-    fast: state.session.agent === 'claude' ? state.fast : false,
+    fast: state.fast, // claude=fastMode；codex=service_tier fast/standard
   };
   state.streaming = true;
   state.runId = null;
@@ -3320,13 +3324,9 @@ function bindEvents() {
     showMenu(e.currentTarget, agentMenuItems(), (it) => setAgent(it.value));
   });
 
-  // 快速开关：claude 切 fastMode；codex 在 低思考等级 与 默认 间切换
+  // 快速开关（仅 claude 可见）：切 fastMode，与思考等级相互独立
   $('#fast-btn').addEventListener('click', () => {
-    if (currentAgent() === 'claude') {
-      state.fast = !state.fast;
-    } else {
-      state.effort = state.effort === 'low' ? null : 'low';
-    }
+    state.fast = !state.fast;
     syncAgentUI();
     savePrefs();
   });

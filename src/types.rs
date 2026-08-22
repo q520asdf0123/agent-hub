@@ -89,7 +89,8 @@ pub struct ChatReq {
     pub model: Option<String>,
     /// "bypass" | "accept-edits" | "plan" | "read-only" | "default"
     pub permission: Option<String>,
-    /// 快速模式（仅 claude：注入 --settings {"fastMode":true}）
+    /// 快速模式：claude 注入 --settings {"fastMode":true}；
+    /// codex 传 -c service_tier="fast"/"standard"（None 则不传，随全局默认）
     pub fast: Option<bool>,
     /// 思考等级：claude 经 --settings effortLevel；codex 经 -c model_reasoning_effort
     pub effort: Option<String>,
@@ -109,6 +110,8 @@ pub struct AgentModels {
     pub context_window: Option<i64>,
     /// 各模型的上下文窗口（模型名 → token 数；claude 按 [1m] 名字、codex 读目录）
     pub windows: std::collections::HashMap<String, i64>,
+    /// codex：config.toml 的全局 service_tier（TUI /fast 持久化；快速开关初始态）
+    pub service_tier: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]

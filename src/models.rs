@@ -81,6 +81,7 @@ fn claude_models() -> AgentModels {
         default_effort,
         context_window: None, // 前端按模型名推断（[1m] → 1M，其余 200k）
         windows,
+        service_tier: None,
     }
 }
 
@@ -94,6 +95,7 @@ fn codex_models() -> AgentModels {
     let mut models: Vec<String> = Vec::new();
     let mut effort_set: Vec<String> = Vec::new();
     let mut windows = std::collections::HashMap::new();
+    let mut service_tier = None;
     let Some(h) = dirs::home_dir() else {
         return AgentModels {
             default,
@@ -102,6 +104,7 @@ fn codex_models() -> AgentModels {
             default_effort,
             context_window: None,
             windows,
+            service_tier,
         };
     };
     let codex = h.join(".codex");
@@ -118,6 +121,9 @@ fn codex_models() -> AgentModels {
                 catalog_path = Some(PathBuf::from(v));
             } else if let Some(v) = toml_str_value(t, "model_reasoning_effort") {
                 default_effort = Some(v);
+            } else if let Some(v) = toml_str_value(t, "service_tier") {
+                // TUI /fast 持久化的全局速度档，作为前端快速开关的初始态
+                service_tier = Some(v);
             } else if let Some(rest) = t.strip_prefix("model_context_window") {
                 if let Some(v) = rest.trim_start().strip_prefix('=') {
                     context_window = v.trim().parse::<i64>().ok();
@@ -184,6 +190,7 @@ fn codex_models() -> AgentModels {
         default_effort,
         context_window,
         windows,
+        service_tier,
     }
 }
 

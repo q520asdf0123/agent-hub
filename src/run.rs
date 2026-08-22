@@ -419,6 +419,21 @@ const CODEX_INIT_PROMPT: &str = "请分析当前代码库，创建（或更新�
 包含项目概述、构建/测试/运行命令、目录结构、代码风格约定和其他对编码 agent 有用的注意事项。\
 内容要精炼、可执行，基于仓库实际情况，不要编造。";
 
+/// codex 快速档：service_tier（TUI 的 /fast 持久化的同一官方配置键；
+/// on→fast / off→standard，显式两态覆盖全局默认，让界面开关所见即所得）。
+fn push_service_tier(args: &mut Vec<String>, req: &ChatReq) {
+    if req.agent != "codex" {
+        return;
+    }
+    if let Some(f) = req.fast {
+        args.push("-c".to_string());
+        args.push(format!(
+            "service_tier=\"{}\"",
+            if f { "fast" } else { "standard" }
+        ));
+    }
+}
+
 /// 按 agent 与新建/resume 组装 argv（CONTRACT §3.2；prompt 一律走 stdin，不进 argv）。
 /// 返回 (argv, stdin 内容)。codex 的 /review、/init 内置命令在此展开。
 fn build_args(req: &ChatReq) -> (Vec<String>, String) {
@@ -443,6 +458,7 @@ fn build_args(req: &ChatReq) -> (Vec<String>, String) {
                 args.push("-c".to_string());
                 args.push(format!("model_reasoning_effort=\"{}\"", e.trim()));
             }
+            push_service_tier(&mut args, req);
             if let Some(m) = req.model.as_deref().filter(|m| !m.trim().is_empty()) {
                 args.push("-c".to_string());
                 args.push(format!("model=\"{}\"", m.trim()));
@@ -537,6 +553,7 @@ fn build_args(req: &ChatReq) -> (Vec<String>, String) {
                         args.push("-c".to_string());
                         args.push(format!("model_reasoning_effort=\"{}\"", e.trim()));
                     }
+                    push_service_tier(&mut args, req);
                     if let Some(m) = req.model.as_deref().filter(|m| !m.trim().is_empty()) {
                         args.push("-m".to_string());
                         args.push(m.to_string());
@@ -558,6 +575,7 @@ fn build_args(req: &ChatReq) -> (Vec<String>, String) {
                     args.push("-c".to_string());
                     args.push(format!("model_reasoning_effort=\"{}\"", e.trim()));
                 }
+                push_service_tier(&mut args, req);
                 if req.permission.as_deref() == Some("bypass") {
                     args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
                 }
@@ -571,6 +589,7 @@ fn build_args(req: &ChatReq) -> (Vec<String>, String) {
                     args.push("-c".to_string());
                     args.push(format!("model_reasoning_effort=\"{}\"", e.trim()));
                 }
+                push_service_tier(&mut args, req);
                 args.push("-C".to_string());
                 args.push(req.project.clone());
                 if let Some(m) = req.model.as_deref().filter(|m| !m.trim().is_empty()) {
