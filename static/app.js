@@ -1430,10 +1430,10 @@ const EFFORT_LABELS = {
 
 function effortLabel() {
   const pre = CUR_LANG === 'en' ? 'Effort·' : '思考·';
-  if (state.effort !== null) return pre + t(EFFORT_LABELS[state.effort] || state.effort) + ' ⌄';
+  if (state.effort !== null) return pre + t(EFFORT_LABELS[state.effort] || state.effort);
   const info = state.modelsInfo && state.modelsInfo[currentAgent()];
   const de = info && info.default_effort;
-  return pre + (de ? t(EFFORT_LABELS[de] || de) : t('默认')) + ' ⌄';
+  return pre + (de ? t(EFFORT_LABELS[de] || de) : t('默认'));
 }
 
 /** 会话一旦有 id（历史打开或新会话已落盘），agent 即锁定不可切换 */
@@ -1497,7 +1497,7 @@ function setBadge(target, agent) {
 
 function permLabel() {
   const f = AGENTS[state.agent].permissions.find((p) => p.value === state.permission);
-  return t(f ? f.label : state.permission) + ' ⌄';
+  return t(f ? f.label : state.permission);
 }
 
 function modelFull() {
@@ -1510,7 +1510,7 @@ function modelLabel() {
   // 长模型名截断展示，完整名放悬停提示（syncAgentUI 里设置 title）
   const full = modelFull();
   const short = full.length > 14 ? full.slice(0, 12) + '…' : full;
-  return short + ' ⌄';
+  return short; // 下拉箭头由 CSS ::after 统一渲染
 }
 
 /** /api/models 结果缓存（Promise，失败重试） */
