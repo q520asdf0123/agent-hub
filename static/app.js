@@ -1429,7 +1429,10 @@ async function pollRuns() {
     const runs = await api.get('/api/runs');
     state.runsIndex = {};
     for (const r of runs) {
-      if (r.session_id) state.runsIndex[r.session_id] = r;
+      if (r.session_id) {
+        state.runsIndex[r.session_id] = r;
+        if (r.running) seenRunningPartners.add(r.session_id); // 供自动回注判定
+      }
     }
     runsIndexAt = Date.now();
     refreshRunBadges();
@@ -3180,6 +3183,18 @@ function transcriptFinalText(tr) {
   return '';
 }
 
+/** 本页观察到过「运行中」的子会话 id：其转为完成时触发自动回注 */
+const seenRunningPartners = new Set();
+
+/** 标记某条协作关联已完成回注（防多窗口/重复触发） */
+function collabLinkMarkFed(primaryKey, partnerKey) {
+  const st = collabStoreLoad();
+  for (const e of st.links[primaryKey] || []) {
+    if (e.partner === partnerKey) e.fed = true;
+  }
+  localStorage.setItem('ah-collab', JSON.stringify(st));
+}
+
 /** 打开会话时缝合协作关联：主会话内联子会话内容；子会话给出主会话入口。
  *  幂等：可在运行状态变化时重复调用刷新（先清旧节点再重建）。 */
 async function stitchCollab(s, tr) {
@@ -3250,37 +3265,51 @@ async function stitchCollab(s, tr) {
         chatMsgs.insertBefore(sec, anchor);
       } else {
         chatMsgs.appendChild(sec);
-        // 无回注锚点且子会话已结束 → 提供补回注（运行中不显示，等自动流程或跑完再说）
+        // 无回注锚点且子会话已结束 → 回注收尾。本页刚观察到它「运行中→完成」
+        // 且未回注过 = 活跃流水线的延续 → 自动回注；否则（陈年旧会话）留手动按钮。
         const pr = state.runsIndex[pId];
-        const finalTxt = pr && pr.running ? '' : transcriptFinalText(tr);
+        const running = pr && pr.running;
+        const finalTxt = running ? '' : transcriptFinalText(tr);
         if (finalTxt) {
-          const btn = el(
-            'button',
-            'btn-ghost collab-feed',
-            CUR_LANG === 'en'
-              ? '▶ Feed this back to the main agent to wrap up'
-              : '▶ 补回注：把该结论交给主 agent 收尾'
-          );
-          btn.type = 'button';
-          btn.addEventListener('click', async () => {
-            if (state.streaming) return;
-            btn.remove();
-            const primaryLabel = AGENTS[s.agent] ? AGENTS[s.agent].label : s.agent;
-            const prompt =
-              ln.kind === 'pipeline'
-                ? '【协作汇总】搭档 agent（' + ln.label + '）已完成其分工' +
-                  (ln.cats ? '（' + ln.cats + '）' : '') + '，产出如下：\n\n' + finalTxt +
-                  '\n\n请核对搭档产出与你的实现是否一致：有出入的直接修正，并给出本次任务的最终总结。'
-                : '【协作复查回注】搭档 agent（' + ln.label + '）对你上一轮工作的只读复查意见如下：\n\n' +
-                  finalTxt + '\n\n请核对以上意见：确认无误的部分简要说明；确有问题的部分直接修正并说明改动。';
-            await runPrimaryFollowup(
-              { agent: s.agent, id: s.id, project: s.project },
-              (CUR_LANG === 'en' ? '🤝 Consolidate · ' : '🤝 汇总回注 · ') + primaryLabel +
-                (CUR_LANG === 'en' ? ' wraps up' : ' 收尾'),
-              prompt
+          const primaryLabel = AGENTS[s.agent] ? AGENTS[s.agent].label : s.agent;
+          const fbPrompt =
+            ln.kind === 'pipeline'
+              ? '【协作汇总】搭档 agent（' + ln.label + '）已完成其分工' +
+                (ln.cats ? '（' + ln.cats + '）' : '') + '，产出如下：\n\n' + finalTxt +
+                '\n\n请核对搭档产出与你的实现是否一致：有出入的直接修正，并给出本次任务的最终总结。'
+              : '【协作复查回注】搭档 agent（' + ln.label + '）对你上一轮工作的只读复查意见如下：\n\n' +
+                finalTxt + '\n\n请核对以上意见：确认无误的部分简要说明；确有问题的部分直接修正并说明改动。';
+          const fbDivider =
+            (CUR_LANG === 'en' ? '🤝 Consolidate · ' : '🤝 汇总回注 · ') + primaryLabel +
+            (CUR_LANG === 'en' ? ' wraps up' : ' 收尾');
+          const fire = async () => {
+            collabLinkMarkFed(key, ln.partner); // 先标记，防多窗口重复回注
+            await runPrimaryFollowup({ agent: s.agent, id: s.id, project: s.project }, fbDivider, fbPrompt);
+          };
+          if (!ln.fed && seenRunningPartners.has(pId) && !state.streaming) {
+            seenRunningPartners.delete(pId);
+            showToast(
+              CUR_LANG === 'en'
+                ? '🤝 Sub-session finished — consolidating back automatically'
+                : '🤝 子会话完成，自动回注收尾中…'
             );
-          });
-          sec.appendChild(btn);
+            fire();
+          } else {
+            const btn = el(
+              'button',
+              'btn-ghost collab-feed',
+              CUR_LANG === 'en'
+                ? '▶ Feed this back to the main agent to wrap up'
+                : '▶ 补回注：把该结论交给主 agent 收尾'
+            );
+            btn.type = 'button';
+            btn.addEventListener('click', () => {
+              if (state.streaming) return;
+              btn.remove();
+              fire();
+            });
+            sec.appendChild(btn);
+          }
         }
       }
       scrollChat();
@@ -3469,6 +3498,9 @@ async function runCollabReview(collab, primaryText) {
     state.session.id === primarySess.id &&
     state.session.agent === primarySess.agent
   ) {
+    if (guardSid.id) {
+      collabLinkMarkFed(primarySess.agent + ':' + primarySess.id, collab.partner + ':' + guardSid.id);
+    }
     await runPrimaryFollowup(
       primarySess,
       (CUR_LANG === 'en' ? '🤝 Feedback · ' : '🤝 复查回注 · ') + primaryLabel +
@@ -3640,6 +3672,9 @@ async function runCollabPipeline(collab, primaryText, meta) {
     state.session.id === primarySess.id &&
     state.session.agent === primarySess.agent
   ) {
+    if (guardSid.id) {
+      collabLinkMarkFed(primarySess.agent + ':' + primarySess.id, collab.partner + ':' + guardSid.id);
+    }
     await runPrimaryFollowup(
       primarySess,
       (CUR_LANG === 'en' ? '🤝 Consolidate · ' : '🤝 汇总回注 · ') + primaryLabel +
