@@ -1479,17 +1479,26 @@ function syncAgentUI() {
   const sageBtn = $('#sage-btn');
   sageBtn.classList.toggle('hidden', !canSwitchAgent());
   sageBtn.classList.toggle('on', state.sageOn);
-  sageBtn.textContent = state.sageOn ? t('🧭 智能路由·开') : t('🧭 智能路由');
+  setToggleChip(sageBtn, t('🧭 智能路由'), state.sageOn);
   // 快速开关（两家都是真实机制，与思考等级相互独立）：
   // claude = --settings fastMode；codex = -c service_tier（TUI /fast 同款配置键）
   const fastBtn = $('#fast-btn');
   fastBtn.classList.remove('hidden');
   fastBtn.classList.toggle('on', state.fast);
-  fastBtn.textContent = state.fast ? t('⚡ 快速·开') : t('⚡ 快速');
+  setToggleChip(fastBtn, t('⚡ 快速'), state.fast);
   fastBtn.title =
     currentAgent() === 'claude'
       ? '快速模式：以 fastMode 设置运行（需模型支持）'
       : '快速档：service_tier=fast（TUI /fast 同款，服务端优先处理，消耗更多额度）';
+}
+
+/** 滑动开关样式的 chip：左侧文案 + 右侧滑轨圆钮 */
+function setToggleChip(btn, label, on) {
+  btn.textContent = '';
+  btn.appendChild(el('span', 'tg-label', label));
+  const track = el('span', 'tg-track' + (on ? ' on' : ''));
+  track.appendChild(el('span', 'tg-knob'));
+  btn.appendChild(track);
 }
 
 function setBadge(target, agent) {
@@ -3037,7 +3046,7 @@ async function onSend() {
   let sageInfo = null;
   if (state.sageOn && !state.session && text && !text.startsWith('/')) {
     const btn = $('#sage-btn');
-    btn.textContent = t('🧭 路由中…');
+    setToggleChip(btn, t('🧭 路由中…'), true);
     try {
       // 失败重路由：同一任务重发时，把上次失败的执行者交给 ExecutionState.failed_agents
       const failed =
