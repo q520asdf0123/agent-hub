@@ -2331,7 +2331,7 @@ async function openSession(s) {
       if (firstAsst) chatMsgs.insertBefore(card, firstAsst);
       else chatMsgs.appendChild(card);
     }
-    stitchCollab(s); // 协作子会话缝合（异步补入，不阻塞打开）
+    stitchCollab(s, t); // 协作子会话缝合（异步补入，不阻塞打开；旧协作按内容回溯配对）
     state.histUsage = t.usage || null; // 供续聊/重连作为用量基线
     if (t.usage) renderUsageFromHistory(t.usage, s.agent); // 已完成会话的整场用量
     if (t.title) {
@@ -2917,8 +2917,61 @@ function collabLinkSave(primaryKey, entry, partnerKey) {
   localStorage.setItem('ah-collab', JSON.stringify(st));
 }
 
+/** 回溯发现历史协作关联（缝合功能上线前的旧协作没有记录）：
+ *  子会话标题以【协作分工/复查】开头，且首条消息含主会话的原任务文本 → 配对。
+ *  命中后回写存储，下次直接命中不再扫描。 */
+async function discoverCollabLinks(s, tr, key) {
+  const um = (tr.messages || []).find(
+    (m) =>
+      m.role === 'user' &&
+      (m.blocks || []).some((b) => b.kind === 'text' && b.text && !b.text.startsWith('【'))
+  );
+  if (!um) return [];
+  const task = (um.blocks.find((b) => b.kind === 'text' && b.text) || {}).text || '';
+  // 主会话首条消息可能带「请查看图片文件: <路径>」后缀，任务书里只有纯文本任务
+  const probe = task.split('请查看图片文件')[0].replace(/\s+/g, ' ').slice(0, 60).trim();
+  if (probe.length < 8) return [];
+  let sessions;
+  try {
+    sessions = await api.get(
+      '/api/sessions?' + new URLSearchParams({ project: s.project || '', limit: '200' })
+    );
+  } catch (_) {
+    return [];
+  }
+  const cands = sessions
+    .filter((x) => x.id !== s.id && /^【协作(分工|复查)】/.test(x.title || ''))
+    .slice(0, 8);
+  const found = [];
+  for (const c of cands) {
+    try {
+      const qs = new URLSearchParams({ agent: c.agent, id: c.id, project: s.project || '' });
+      const sub = await api.get('/api/session?' + qs);
+      const first = (sub.messages || []).find((m) => m.role === 'user');
+      const txt = first ? (first.blocks || []).map((b) => b.text || '').join('\n') : '';
+      if (!txt.replace(/\s+/g, ' ').includes(probe)) continue;
+      const kind = /^【协作分工】/.test(txt.trim()) ? 'pipeline' : 'review';
+      const cm = txt.match(/你负责：([^。\n]+)/);
+      found.push({
+        partner: c.agent + ':' + c.id,
+        label: AGENTS[c.agent] ? AGENTS[c.agent].label : c.agent,
+        kind,
+        cats: kind === 'pipeline' && cm ? cm[1] : undefined,
+        ts: Date.parse(c.created || '') || 0,
+      });
+    } catch (_) {
+      /* 单个候选失败跳过 */
+    }
+  }
+  found.sort((a, b) => a.ts - b.ts);
+  for (const ln of found) {
+    collabLinkSave(key, ln, ln.partner); // 回写，下次免扫描
+  }
+  return found;
+}
+
 /** 打开会话时缝合协作关联：主会话内联子会话内容；子会话给出主会话入口 */
-async function stitchCollab(s) {
+async function stitchCollab(s, tr) {
   const key = s.agent + ':' + s.id;
   const st = collabStoreLoad();
   const primaryKey = st.back[key];
@@ -2940,8 +2993,12 @@ async function stitchCollab(s) {
     });
     chatMsgs.insertBefore(d, chatMsgs.firstChild);
   }
-  const links = st.links[key];
-  if (!links || !links.length) return;
+  let links = st.links[key] ? [...st.links[key]] : [];
+  if (!links.length && tr) {
+    links = await discoverCollabLinks(s, tr, key); // 旧协作回溯配对
+    if (!state.session || state.session.id !== s.id || state.session.agent !== s.agent) return;
+  }
+  if (!links.length) return;
   for (const ln of links) {
     try {
       const i = ln.partner.indexOf(':');
