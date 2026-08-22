@@ -3470,6 +3470,114 @@ async function runPrimaryFollowup(primarySess, dividerText, prompt) {
   }
 }
 
+/** 追问分诊：协作会话的追问经 SAGE 判定属搭档擅长域 → 转子会话执行并自动回注。
+ *  子会话有搭档完整的分工上下文，执行类追问在那里做比主会话更对口。 */
+async function runDelegatedFollowup(delegate, text) {
+  const primarySess = {
+    agent: state.session.agent,
+    id: state.session.id,
+    project: state.session.project,
+  };
+  appendUserBubble(chatMsgs, text, []);
+  scrollChat();
+  chatMsgs.appendChild(
+    renderDivider(
+      (CUR_LANG === 'en' ? '🤝 Follow-up delegated · ' : '🤝 追问分派 · ') + delegate.label
+    )
+  );
+  const savedHist = state.histUsage;
+  state.histUsage = null;
+  beginAssistant();
+  state.histUsage = savedHist;
+  const i = delegate.partner.indexOf(':');
+  const req = {
+    agent: delegate.agent,
+    project: primarySess.project,
+    prompt:
+      '【协作追问】主会话在你完成分工后收到如下追问，路由判定它属于你的执行领域，' +
+      '请基于你本会话的上下文继续处理：\n\n' + text,
+    session_id: delegate.partner.slice(i + 1),
+    model: null,
+    permission: state.permission,
+    effort: null,
+    fast: false,
+    memory: state.memOn,
+  };
+  state.streaming = true;
+  state.runId = null;
+  setSendButton(true);
+  const ac = new AbortController();
+  state.abort = ac;
+  // 守卫：在子会话续跑，不接管当前（主）会话 id
+  const guard = (ev) => {
+    if (!ev) return;
+    if (ev.t === 'init') return;
+    if (ev.t === 'done') {
+      if (stream) {
+        flushFilesCard(stream.ctx);
+        if (!ev.ok) {
+          stream.ctx.bodyEl.appendChild(
+            el('div', 'error-bar', ev.error || t('运行失败（无错误信息）'))
+          );
+        } else if (Date.now() - stream.startedAt > 3000) {
+          stream.ctx.bodyEl.appendChild(
+            el('div', 'done-line', t('已处理') + ' ' + fmtDuration(Date.now() - stream.startedAt))
+          );
+        }
+      }
+      return;
+    }
+    handleEvent(ev);
+  };
+  let partnerFinal = '';
+  let partnerOk = false;
+  try {
+    await streamChat(req, guard, ac.signal);
+  } catch (e) {
+    if (stream && e && e.name !== 'AbortError') {
+      stream.ctx.bodyEl.appendChild(el('div', 'error-bar', t('请求失败：') + (e.message || e)));
+    }
+  } finally {
+    if (stream) {
+      partnerFinal = stream.finalText || '';
+      partnerOk = !!stream.doneOk;
+    }
+    finalizeStream();
+    state.streaming = false;
+    state.abort = null;
+    state.runId = null;
+    setSendButton(false);
+    loadConvs();
+  }
+  // 证据回喂：分派判定的真实结果
+  if (delegate.decision && delegate.decision.decision_blob) {
+    api
+      .post('/api/sage/outcome', {
+        decision_blob: delegate.decision.decision_blob,
+        success: partnerOk ? 1 : 0,
+      })
+      .catch(() => {});
+  }
+  // 回注：搭档对追问的处理结果交还主会话整合
+  if (
+    partnerOk &&
+    partnerFinal.trim() &&
+    state.session &&
+    state.session.id === primarySess.id &&
+    state.session.agent === primarySess.agent
+  ) {
+    await runPrimaryFollowup(
+      primarySess,
+      (CUR_LANG === 'en' ? '🤝 Consolidate · ' : '🤝 汇总回注 · ') +
+        (AGENTS[primarySess.agent] ? AGENTS[primarySess.agent].label : primarySess.agent) +
+        (CUR_LANG === 'en' ? ' wraps up' : ' 收尾'),
+      '【协作汇总】搭档 agent（' + delegate.label + '）已处理该追问，结果如下：\n\n' +
+        partnerFinal +
+        '\n\n请核对并整合到当前结论中：有出入的直接修正，并简要确认最终状态。'
+    );
+  }
+}
+
 async function onSend() {
   if (state.streaming) return;
   const text = promptInput.value.trim();
@@ -3516,6 +3624,45 @@ async function onSend() {
       sageInfo = null; // 路由失败回退当前 agent，不阻塞发送
     }
     syncAgentUI();
+  }
+
+  // 追问分诊：协作会话的追问先过路由——属搭档擅长域则转子会话执行并回注
+  //（主会话可能规划强执行弱，执行类追问交给有分工上下文的子会话更对口）
+  if (
+    state.sageOn &&
+    state.session &&
+    state.session.id &&
+    text &&
+    !text.startsWith('/') &&
+    !atts.length
+  ) {
+    const key = state.session.agent + ':' + state.session.id;
+    const links = collabStoreLoad().links[key] || [];
+    const last = links[links.length - 1];
+    const pAgent = last ? last.partner.slice(0, last.partner.indexOf(':')) : null;
+    if (pAgent && pAgent !== state.session.agent && AGENTS[pAgent]) {
+      let d = null;
+      try {
+        d = await api.post('/api/sage', { prompt: text, agent: state.session.agent });
+      } catch (_) {
+        /* 判定失败 → 按主会话执行 */
+      }
+      if (d && d.primary === pAgent) {
+        hideComposerError();
+        promptInput.value = '';
+        autoGrow();
+        showToast(
+          CUR_LANG === 'en'
+            ? '🧭 Follow-up suits ' + last.label + ' — running in sub-session, will consolidate back'
+            : '🧭 该追问更适合 ' + last.label + '，转子会话执行，完成后回注'
+        );
+        await runDelegatedFollowup(
+          { partner: last.partner, agent: pAgent, label: last.label, decision: d },
+          text
+        );
+        return;
+      }
+    }
   }
 
   if (!state.session) {
