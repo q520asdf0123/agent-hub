@@ -4281,6 +4281,35 @@ function bindEvents() {
     }
   });
 
+  // 键盘导航：↑/↓ 平滑滚动对话区；← 子会话退回主会话，主会话退到新建。
+  // 输入框有内容时不接管（保留光标移动）；空的主输入框视为页面导航。
+  document.addEventListener('keydown', (e) => {
+    if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    const tg = e.target;
+    const typing =
+      tg && (tg.tagName === 'TEXTAREA' || tg.tagName === 'INPUT' || tg.isContentEditable);
+    if (typing && !(tg === promptInput && !promptInput.value)) return;
+    if (!state.session) return; // 仅对话视图
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      chatScrollEl.scrollBy({ top: e.key === 'ArrowDown' ? 140 : -140, behavior: 'smooth' });
+    } else if (e.key === 'ArrowLeft') {
+      if (state.streaming) return; // 运行中不切走
+      e.preventDefault();
+      if (state.backPrimary) {
+        const i = state.backPrimary.indexOf(':');
+        openSession({
+          agent: state.backPrimary.slice(0, i),
+          id: state.backPrimary.slice(i + 1),
+          project: state.session.project,
+          title: '',
+        });
+      } else {
+        onNewSession(); // 主会话 → 退到新建会话
+      }
+    }
+  });
+
   // 菜单关闭
   document.addEventListener('click', () => closeMenu());
   document.addEventListener('keydown', (e) => {
