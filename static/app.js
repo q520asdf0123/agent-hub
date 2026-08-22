@@ -1185,16 +1185,29 @@ function sessionRow(s) {
   return row;
 }
 
+/** runs → session_id 索引。同一会话可能有多次运行（旧轮已完成 + 新轮运行中，
+ *  注册表顺序随机）：运行中优先，其次取较新的（run_id 含毫秒时间戳）。 */
+function buildRunsIndex(runs) {
+  const idx = {};
+  const ts = (x) => parseInt(((x && x.run_id) || '').split('-')[1] || '0', 10);
+  for (const r of runs) {
+    if (!r.session_id) continue;
+    const prev = idx[r.session_id];
+    if (!prev || (r.running && !prev.running) || (!!r.running === !!prev.running && ts(r) > ts(prev))) {
+      idx[r.session_id] = r;
+    }
+    if (r.running) seenRunningPartners.add(r.session_id); // 供自动回注判定
+  }
+  return idx;
+}
+
 /** 运行注册表兜底：刷新 runsIndex（列表合并运行中任务用，3 秒内不重复拉） */
 let runsIndexAt = 0;
 async function ensureRunsIndex() {
   if (Date.now() - runsIndexAt < 3000) return;
   try {
     const runs = await api.get('/api/runs');
-    state.runsIndex = {};
-    for (const r of runs) {
-      if (r.session_id) state.runsIndex[r.session_id] = r;
-    }
+    state.runsIndex = buildRunsIndex(runs);
     runsIndexAt = Date.now();
   } catch (_) {
     /* 忽略 */
@@ -1427,13 +1440,7 @@ let lastRunningSig = '';
 async function pollRuns() {
   try {
     const runs = await api.get('/api/runs');
-    state.runsIndex = {};
-    for (const r of runs) {
-      if (r.session_id) {
-        state.runsIndex[r.session_id] = r;
-        if (r.running) seenRunningPartners.add(r.session_id); // 供自动回注判定
-      }
-    }
+    state.runsIndex = buildRunsIndex(runs);
     runsIndexAt = Date.now();
     refreshRunBadges();
     renderCollabPanel(); // 子会话运行状态实时刷新
@@ -3353,31 +3360,62 @@ function sageCard(d) {
     el('span', 'card-title', t('🧭 SAGE 路由') + ' · ' + t(MODE_CN[d.mode] || d.mode) + ' → ' + who)
   );
   const body = el('div', 'card-body');
+  const en = CUR_LANG === 'en';
+  const REQ_CN = {
+    analysis: '分析', debugging: '调试', coding: '编码', planning: '规划',
+    review: '审查', docs: '文档', refactor: '重构', vision: '视觉',
+  };
+  const reqName = (k) => (en ? k : REQ_CN[k] || k);
   const lines = [];
-  const reqs = Object.entries(d.requirements || {})
-    .map(([k, v]) => k + ' ' + v)
-    .join('，');
-  if (reqs) lines.push(t('需求推断：') + reqs);
+  const reqEntries = Object.entries(d.requirements || {});
+  if (reqEntries.length) {
+    lines.push(
+      (en ? 'Task makeup: ' : '任务构成：') +
+        reqEntries.map(([k, v]) => reqName(k) + ' ' + Math.round(v * 100) + '%').join('、')
+    );
+  }
+  // 判定结论（自然语言）
+  if (d.mode === 'handoff') {
+    lines.push(
+      en
+        ? `Verdict: ${who} is the specialist for this — handing over for solo execution (new session, nothing to lose in the switch).`
+        : `判定：这类任务 ${who} 更擅长，移交给它单独执行（新会话切换没有损失）。`
+    );
+  } else if (d.mode === 'self') {
+    lines.push(
+      en
+        ? `Verdict: the current agent (${who}) is already the best fit — no handoff or teaming needed.`
+        : `判定：当前的 ${who} 就是最合适的执行者，无需移交或组队。`
+    );
+  }
   if (d.partner) {
     const p = AGENTS[d.partner] ? AGENTS[d.partner].label : d.partner;
     const cats = Object.entries(d.assignments || {})
       .filter(([, a]) => a === d.partner)
-      .map(([r]) => r);
-    const w = cats.reduce((s, r) => s + ((d.requirements || {})[r] || 0), 0);
-    const primaryName = AGENTS[d.primary] ? AGENTS[d.primary].label : d.primary;
+      .map(([r]) => reqName(r));
+    const w = Object.entries(d.assignments || {})
+      .filter(([, a]) => a === d.partner)
+      .reduce((s, [r]) => s + ((d.requirements || {})[r] || 0), 0);
     lines.push(
       w >= 0.25
-        ? t('执行顺序：') + primaryName + t(' 先做自己的部分 → 搭档 ') + p +
-          '（' + cats.join('、') + '）' + t(' 接力 → 回注汇总')
-        : t('协作：完成后由 ') + p + t(' 复查，结论回注收尾')
+        ? en
+          ? `Verdict: this needs both specialties — ${who} does its part first, then partner ${p} takes over ${cats.join(' & ')}, and the results are consolidated back.`
+          : `判定：任务需要两种专长——${who} 先做自己负责的部分，然后搭档 ${p} 接力完成${cats.join('、')}，最后结论回注汇总。`
+        : en
+          ? `After finishing, ${p} will review the result read-only and feed findings back.`
+          : `完成后会由 ${p} 只读复查一遍，意见回注收尾。`
     );
   }
+  // 打分（口语化）
+  const pct = (x) => Math.round((x || 0) * 100) + '%';
   lines.push(
-    t('成功率 ') + d.success_probability + t(' · 覆盖 ') + d.coverage + t(' · 效用 ') + d.utility
+    en
+      ? `Estimated success ${pct(d.success_probability)}, capability coverage ${pct(d.coverage)} — the highest-utility option among solo / handoff / team.`
+      : `预计成功率 ${pct(d.success_probability)}，能力覆盖 ${pct(d.coverage)}——在「自己干 / 移交 / 组队」三个方案里综合得分最高。`
   );
-  if (d.explanation) lines.push(d.explanation);
   const pre = el('pre', 'io-pre');
   pre.textContent = lines.join('\n');
+  if (d.explanation) pre.title = d.explanation; // 算法原始解释放悬浮提示
   body.appendChild(pre);
   card.appendChild(head);
   card.appendChild(body);

@@ -474,6 +474,24 @@ fn memory_proxy_conf() -> Option<MemConf> {
 /// 待上游支持 headless 或实现预热轮方案后再启用（-c 内联 provider 代码见 git 历史）。
 fn push_memory_provider(_args: &mut [String], _req: &ChatReq) {}
 
+/// codex 图片附件：从 prompt 提取「请查看图片文件: <路径>」约定的本地图片，
+/// 以官方 -i 参数直接附进消息——不依赖模型运行中调用读图工具，
+/// 规避会话级读图偶发失效。prompt 文本行保留（转录展示仍可还原缩略图）。
+fn push_codex_images(args: &mut Vec<String>, req: &ChatReq) {
+    if req.agent != "codex" {
+        return;
+    }
+    for line in req.prompt.lines() {
+        if let Some(rest) = line.trim().strip_prefix("请查看图片文件:") {
+            let p = rest.trim();
+            if !p.is_empty() && std::path::Path::new(p).exists() {
+                args.push("-i".to_string());
+                args.push(p.to_string());
+            }
+        }
+    }
+}
+
 /// codex 快速档：service_tier（TUI 的 /fast 持久化的同一官方配置键；
 /// on→fast / off→standard，显式两态覆盖全局默认，让界面开关所见即所得）。
 fn push_service_tier(args: &mut Vec<String>, req: &ChatReq) {
@@ -638,7 +656,8 @@ fn build_args(req: &ChatReq) -> (Vec<String>, String) {
                         args.push(format!("model_reasoning_effort=\"{}\"", e.trim()));
                     }
                     push_service_tier(&mut args, req);
-            push_memory_provider(&mut args, req);
+                    push_memory_provider(&mut args, req);
+                    push_codex_images(&mut args, req);
                     if let Some(m) = req.model.as_deref().filter(|m| !m.trim().is_empty()) {
                         args.push("-m".to_string());
                         args.push(m.to_string());
@@ -661,7 +680,8 @@ fn build_args(req: &ChatReq) -> (Vec<String>, String) {
                     args.push(format!("model_reasoning_effort=\"{}\"", e.trim()));
                 }
                 push_service_tier(&mut args, req);
-            push_memory_provider(&mut args, req);
+                push_memory_provider(&mut args, req);
+                push_codex_images(&mut args, req);
                 if req.permission.as_deref() == Some("bypass") {
                     args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
                 }
@@ -676,7 +696,8 @@ fn build_args(req: &ChatReq) -> (Vec<String>, String) {
                     args.push(format!("model_reasoning_effort=\"{}\"", e.trim()));
                 }
                 push_service_tier(&mut args, req);
-            push_memory_provider(&mut args, req);
+                push_memory_provider(&mut args, req);
+                push_codex_images(&mut args, req);
                 args.push("-C".to_string());
                 args.push(req.project.clone());
                 if let Some(m) = req.model.as_deref().filter(|m| !m.trim().is_empty()) {
