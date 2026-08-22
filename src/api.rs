@@ -51,6 +51,16 @@ pub async fn app_js() -> impl IntoResponse {
     )
 }
 
+pub async fn favicon_svg() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "image/svg+xml"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        include_str!("../static/favicon.svg"),
+    )
+}
+
 pub async fn style_css() -> impl IntoResponse {
     (
         [

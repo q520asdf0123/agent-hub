@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Agent Hub：双 agent（Claude 橙 / Codex 蓝）交汇于一个枢纽 -->
+  <rect width="64" height="64" rx="14" fill="#2b2320"/>
+  <circle cx="24.5" cy="32" r="14.5" fill="#d97757"/>
+  <circle cx="39.5" cy="32" r="14.5" fill="#2d7ff0" stroke="#2b2320" stroke-width="3"/>
+  <circle cx="32" cy="32" r="4.6" fill="#faf8f2"/>
+</svg>

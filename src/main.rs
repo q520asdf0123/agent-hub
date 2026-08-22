@@ -26,6 +26,7 @@ async fn main() {
         .route("/", get(api::index_html))
         .route("/app.js", get(api::app_js))
         .route("/style.css", get(api::style_css))
+        .route("/favicon.svg", get(api::favicon_svg))
         .route("/api/status", get(api::status))
         .route("/api/projects", get(api::projects).post(api::add_project))
         .route("/api/projects/discover", get(api::discover_projects))
