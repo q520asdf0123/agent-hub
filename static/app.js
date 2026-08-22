@@ -1517,9 +1517,10 @@ function syncAgentUI() {
   setToggleChip(sageBtn, t('🧭 智能路由'), state.sageOn);
   // 快速开关（两家都是真实机制，与思考等级相互独立）：
   // claude = --settings fastMode；codex = -c service_tier（TUI /fast 同款配置键）
-  // TDAI 团队记忆：按次经代理注入/沉淀（两家 CLI 都支持）
+  // TDAI 团队记忆：仅 claude 显示（codex 的无界面接入被上游门控阻断，暂不支持）
   const memBtn = $('#mem-btn');
   if (memBtn) {
+    memBtn.classList.toggle('hidden', currentAgent() !== 'claude');
     memBtn.classList.toggle('on', state.memOn);
     setToggleChip(memBtn, t('🧠 记忆'), state.memOn);
   }
