@@ -54,7 +54,8 @@ const I18N_EN = {
   '🧭 SAGE 路由': '🧭 SAGE routing', '继续当前': 'Stay', '移交': 'Handoff', '协作': 'Collaborate',
   '需求推断：': 'Inferred needs: ', '协作：完成后由 ': 'Collaborate: reviewed by ',
   ' 复查，结论回注收尾': ', findings fed back to wrap up',
-  '协作分工：': 'Division of work: ', '，完成后回注汇总': ', output consolidated back afterwards',
+  '执行顺序：': 'Order: ', ' 先做自己的部分 → 搭档 ': ' does its part first → partner ',
+  ' 接力 → 回注汇总': ' takes over → consolidate back',
   '成功率 ': 'Success ', ' · 覆盖 ': ' · Coverage ', ' · 效用 ': ' · Utility ',
   '点击查看差异 · 右键更多操作': 'Click for diff · right-click for more', '缓存': 'Cache', '上下文': 'Context', '点击放大': 'Click to zoom',
   '刚刚': 'just now', '跟随浏览器': 'Follow browser', '选择项目…': 'Pick a project…',
@@ -1403,13 +1404,26 @@ function applyRunBadge(row, st) {
 }
 
 function refreshRunBadges() {
+  const links = collabStoreLoad().links;
   document.querySelectorAll('.srow').forEach((row) => {
     const key = row.dataset.key || '';
     const id = key.split(':').slice(1).join(':');
-    applyRunBadge(row, state.runsIndex[id]);
+    let r = state.runsIndex[id];
+    // 聚合协作子会话状态：主会话自身已结束但分工子会话还在跑 → 整体仍显示运行中
+    if (!r || !r.running) {
+      for (const ln of links[key] || []) {
+        const pr = state.runsIndex[ln.partner.slice(ln.partner.indexOf(':') + 1)];
+        if (pr && pr.running) {
+          r = { running: true };
+          break;
+        }
+      }
+    }
+    applyRunBadge(row, r);
   });
 }
 
+let lastRunningSig = '';
 async function pollRuns() {
   try {
     const runs = await api.get('/api/runs');
@@ -1417,8 +1431,24 @@ async function pollRuns() {
     for (const r of runs) {
       if (r.session_id) state.runsIndex[r.session_id] = r;
     }
+    runsIndexAt = Date.now();
     refreshRunBadges();
     renderCollabPanel(); // 子会话运行状态实时刷新
+    // 运行集合变化（新任务开始/结束）→ 重载侧栏列表，运行中会话实时出现
+    const sig = runs
+      .filter((r) => r.running)
+      .map((r) => r.session_id || r.run_id)
+      .sort()
+      .join(',');
+    if (sig !== lastRunningSig) {
+      lastRunningSig = sig;
+      loadConvs();
+      renderProjects();
+      // 分工子会话状态变化（如跑完）→ 重缝合当前会话（补回注按钮及时浮现）
+      if (state.session && state.session.id && !state.streaming) {
+        stitchCollab(state.session, null);
+      }
+    }
   } catch (_) {
     /* 忽略 */
   }
@@ -2747,6 +2777,7 @@ function handleEvent(ev) {
       if (ev.session_id && state.session && state.session.id !== ev.session_id) {
         state.session.id = ev.session_id;
         prependConvRow();
+        renderProjects(); // 项目分组里也立即出现（合并运行中占位）
       }
       // 路由决策在拿到会话 id 的瞬间立即持久化——中途刷新页面也不丢
       if (state.pendingSage && state.session && state.session.id) {
@@ -2982,7 +3013,10 @@ function collabStoreLoad() {
 function collabLinkSave(primaryKey, entry, partnerKey) {
   const st = collabStoreLoad();
   st.links[primaryKey] = st.links[primaryKey] || [];
-  st.links[primaryKey].push(entry);
+  // 幂等：同一子会话只记一条（init 早存 + 结束兜底存会各调一次）
+  if (!st.links[primaryKey].some((e) => e.partner === entry.partner)) {
+    st.links[primaryKey].push(entry);
+  }
   st.back[partnerKey] = primaryKey;
   const keys = Object.keys(st.links);
   while (keys.length > 80) {
@@ -3146,10 +3180,12 @@ function transcriptFinalText(tr) {
   return '';
 }
 
-/** 打开会话时缝合协作关联：主会话内联子会话内容；子会话给出主会话入口 */
+/** 打开会话时缝合协作关联：主会话内联子会话内容；子会话给出主会话入口。
+ *  幂等：可在运行状态变化时重复调用刷新（先清旧节点再重建）。 */
 async function stitchCollab(s, tr) {
   const key = s.agent + ':' + s.id;
   const st = collabStoreLoad();
+  chatMsgs.querySelectorAll('.collab-stitch, .divider.collab-jump').forEach((n) => n.remove());
   const primaryKey = st.back[key];
   if (primaryKey) {
     const d = renderDivider(
@@ -3176,12 +3212,14 @@ async function stitchCollab(s, tr) {
   }
   renderCollabPanel(); // 回溯配对可能新增关联 → 刷新右侧面板
   if (!links.length) return;
+  await ensureRunsIndex(); // 补回注按钮需要知道子会话是否还在运行
   for (const ln of links) {
     try {
       const i = ln.partner.indexOf(':');
+      const pId = ln.partner.slice(i + 1);
       const qs = new URLSearchParams({
         agent: ln.partner.slice(0, i),
-        id: ln.partner.slice(i + 1),
+        id: pId,
         project: s.project || '',
       });
       const tr = await api.get('/api/session?' + qs);
@@ -3212,8 +3250,9 @@ async function stitchCollab(s, tr) {
         chatMsgs.insertBefore(sec, anchor);
       } else {
         chatMsgs.appendChild(sec);
-        // 无回注锚点 = 当时中途刷新，主 agent 没读过这份产出 → 提供补回注
-        const finalTxt = transcriptFinalText(tr);
+        // 无回注锚点且子会话已结束 → 提供补回注（运行中不显示，等自动流程或跑完再说）
+        const pr = state.runsIndex[pId];
+        const finalTxt = pr && pr.running ? '' : transcriptFinalText(tr);
         if (finalTxt) {
           const btn = el(
             'button',
@@ -3296,9 +3335,11 @@ function sageCard(d) {
       .filter(([, a]) => a === d.partner)
       .map(([r]) => r);
     const w = cats.reduce((s, r) => s + ((d.requirements || {})[r] || 0), 0);
+    const primaryName = AGENTS[d.primary] ? AGENTS[d.primary].label : d.primary;
     lines.push(
       w >= 0.25
-        ? t('协作分工：') + p + '（' + cats.join('、') + '）' + t('，完成后回注汇总')
+        ? t('执行顺序：') + primaryName + t(' 先做自己的部分 → 搭档 ') + p +
+          '（' + cats.join('、') + '）' + t(' 接力 → 回注汇总')
         : t('协作：完成后由 ') + p + t(' 复查，结论回注收尾')
     );
   }
@@ -3363,7 +3404,16 @@ async function runCollabReview(collab, primaryText) {
   const guard = (ev) => {
     if (!ev) return;
     if (ev.t === 'init') {
-      if (ev.session_id && !guardSid.id) guardSid.id = ev.session_id;
+      if (ev.session_id && !guardSid.id) {
+        guardSid.id = ev.session_id;
+        // 拿到 id 立即建立关联 → 右上角面板实时出现（不等复查结束）
+        collabLinkSave(
+          primarySess.agent + ':' + primarySess.id,
+          { partner: collab.partner + ':' + guardSid.id, label: partnerLabel, kind: 'review', ts: Date.now() },
+          collab.partner + ':' + guardSid.id
+        );
+        renderCollabPanel();
+      }
       return;
     }
     if (ev.t === 'done') {
@@ -3484,7 +3534,22 @@ async function runCollabPipeline(collab, primaryText, meta) {
   const guard = (ev) => {
     if (!ev) return;
     if (ev.t === 'init') {
-      if (ev.session_id && !guardSid.id) guardSid.id = ev.session_id;
+      if (ev.session_id && !guardSid.id) {
+        guardSid.id = ev.session_id;
+        // 拿到 id 立即建立关联 → 右上角面板实时出现（不等分工结束）
+        collabLinkSave(
+          primarySess.agent + ':' + primarySess.id,
+          {
+            partner: collab.partner + ':' + guardSid.id,
+            label: partnerLabel,
+            kind: 'pipeline',
+            cats: cats.join('、'),
+            ts: Date.now(),
+          },
+          collab.partner + ':' + guardSid.id
+        );
+        renderCollabPanel();
+      }
       return;
     }
     if (ev.t === 'done') {
