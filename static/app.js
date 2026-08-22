@@ -2317,6 +2317,22 @@ async function openSession(s) {
   showChat();
   setChatHead(state.session);
   renderCollabPanel(); // 右侧子会话面板（无关联则隐藏）
+  // 子会话：头部常驻「返回主会话 / 回注主会话」（顶部横幅滚下去就看不见了）
+  state.backPrimary = collabStoreLoad().back[s.agent + ':' + s.id] || null;
+  const bb = $('#back-primary-btn');
+  const fb = $('#feed-primary-btn');
+  if (bb) {
+    bb.classList.toggle('hidden', !state.backPrimary);
+    bb.textContent = CUR_LANG === 'en' ? '← Main session' : '← 主会话';
+  }
+  if (fb) {
+    fb.classList.toggle('hidden', !state.backPrimary);
+    fb.textContent = CUR_LANG === 'en' ? '⇪ Feed back' : '⇪ 回注主会话';
+    fb.title =
+      CUR_LANG === 'en'
+        ? 'Send this sub-session\'s latest conclusion to the main session to act on'
+        : '把子会话最新结论交给主会话消化落实（主会话不会自动看见子会话内容）';
+  }
   const ub = $('#usage-bar');
   if (ub) ub.classList.add('hidden'); // 历史会话无实时用量数据
   promptInput.placeholder = t('继续这个会话…');
@@ -2975,6 +2991,41 @@ async function discoverCollabLinks(s, tr, key) {
     collabLinkSave(key, ln, ln.partner); // 回写，下次免扫描
   }
   return found;
+}
+
+/** 子会话最新结论回注主会话：跳回主会话，让主 agent 消化并落实后续 */
+async function feedBackToPrimary() {
+  if (state.streaming || !state.backPrimary || !state.session) return;
+  const sub = {
+    agent: state.session.agent,
+    id: state.session.id,
+    project: state.session.project,
+  };
+  const subLabel = AGENTS[sub.agent] ? AGENTS[sub.agent].label : sub.agent;
+  const pk = state.backPrimary;
+  let finalTxt = '';
+  try {
+    const qs = new URLSearchParams({ agent: sub.agent, id: sub.id, project: sub.project || '' });
+    finalTxt = transcriptFinalText(await api.get('/api/session?' + qs));
+  } catch (_) {
+    /* 取不到就落到空 */
+  }
+  if (!finalTxt) {
+    showToast(CUR_LANG === 'en' ? 'Nothing to feed back yet' : '子会话暂无可回注的结论');
+    return;
+  }
+  const i = pk.indexOf(':');
+  const prim = { agent: pk.slice(0, i), id: pk.slice(i + 1), project: sub.project, title: '' };
+  await openSession(prim);
+  if (!state.session || state.session.id !== prim.id || state.session.agent !== prim.agent) return;
+  await runPrimaryFollowup(
+    { agent: prim.agent, id: prim.id, project: prim.project },
+    (CUR_LANG === 'en' ? '🤝 Consolidate · ' : '🤝 汇总回注 · ') +
+      (AGENTS[prim.agent] ? AGENTS[prim.agent].label : prim.agent) +
+      (CUR_LANG === 'en' ? ' wraps up' : ' 收尾'),
+    '【协作汇总】搭档 agent（' + subLabel + '）在子会话中的最新结论如下：\n\n' + finalTxt +
+      '\n\n请消化这份结论并在本会话中落实后续（需要实现或修改的直接进行），最后给出状态确认。'
+  );
 }
 
 /* ---------- 右侧协作子会话面板：状态 + 入口（子会话不进侧栏） ---------- */
@@ -4155,6 +4206,19 @@ function bindEvents() {
   // 侧栏
   $('#btn-new-session').addEventListener('click', onNewSession);
   $('#btn-new-session-2').addEventListener('click', onNewSession);
+
+  // 子会话头部：返回主会话 / 回注主会话
+  $('#back-primary-btn').addEventListener('click', () => {
+    if (!state.backPrimary || !state.session) return;
+    const i = state.backPrimary.indexOf(':');
+    openSession({
+      agent: state.backPrimary.slice(0, i),
+      id: state.backPrimary.slice(i + 1),
+      project: state.session.project,
+      title: '',
+    });
+  });
+  $('#feed-primary-btn').addEventListener('click', feedBackToPrimary);
   $('#btn-add-project').addEventListener('click', (e) => {
     e.stopPropagation();
     openProjectPicker(e.currentTarget);
