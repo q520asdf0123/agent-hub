@@ -156,6 +156,8 @@ button { font-family: inherit; }
   user-select: none;
 }
 .prow:hover { background: var(--card); }
+.pgroup.dragging { opacity: 0.45; }
+.pgroup.dragging .prow { background: var(--card); }
 .folder-ico { color: #7f7f7f; flex-shrink: 0; display: block; }
 .prow-name {
   flex: 1;

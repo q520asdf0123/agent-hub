@@ -288,6 +288,21 @@ pub async fn stream_chat(registry: &RunRegistry, req: ChatReq) -> Response {
             }
         }
         let exit_ok = child.wait().await.map(|s| s.success()).unwrap_or(false);
+        // codex 短任务可能在 tailer 首次唤醒前就结束 → done 前同步补读最终用量
+        if agent == "codex" {
+            if let Some(sid) = st.session_id.clone() {
+                let info = tokio::task::spawn_blocking(move || {
+                    crate::history::codex::rollout_path_for(&sid)
+                        .and_then(|p| crate::history::codex::latest_token_count(&p))
+                })
+                .await
+                .ok()
+                .flatten();
+                if let Some(e) = info.as_ref().and_then(codex_usage_from_info) {
+                    pump.push(&e);
+                }
+            }
+        }
         let ok = exit_ok && !st.is_error && st.error.is_none() && !killed;
         let error: Option<String> = if killed {
             Some("已停止".to_string())
@@ -349,24 +364,32 @@ async fn codex_usage_tailer(rs: Arc<RunState>) {
             continue; // 没有新数据，不重复推送
         }
         last_sig = sig;
-        let tot = info.get("total_token_usage").unwrap_or(&info);
-        if let Some(mut e) = usage_event("set", tot) {
-            e["scope"] = json!("session");
-            if let Some(last) = info.get("last_token_usage") {
-                let g = |k: &str| last.get(k).and_then(Value::as_i64).unwrap_or(0);
-                let ctx = g("input_tokens"); // OpenAI 语义已含缓存 → 即当前上下文占用
-                if ctx > 0 {
-                    e["context"] = json!(ctx);
-                }
-            } else if let Some(o) = e.as_object_mut() {
-                o.remove("context");
-            }
-            if let Some(w) = info.get("model_context_window").and_then(Value::as_i64) {
-                e["window"] = json!(w);
-            }
+        if let Some(e) = codex_usage_from_info(&info) {
             rs.push(&e);
         }
     }
+}
+
+/// 回放文件 token_count 的 info → scope=session 的 usage 事件。
+fn codex_usage_from_info(info: &Value) -> Option<Value> {
+    let tot = info.get("total_token_usage").unwrap_or(info);
+    let mut e = usage_event("set", tot)?;
+    e["scope"] = json!("session");
+    if let Some(last) = info.get("last_token_usage") {
+        let g = |k: &str| last.get(k).and_then(Value::as_i64).unwrap_or(0);
+        let ctx = g("input_tokens"); // OpenAI 语义已含缓存 → 即当前上下文占用
+        if ctx > 0 {
+            e["context"] = json!(ctx);
+        } else if let Some(o) = e.as_object_mut() {
+            o.remove("context");
+        }
+    } else if let Some(o) = e.as_object_mut() {
+        o.remove("context");
+    }
+    if let Some(w) = info.get("model_context_window").and_then(Value::as_i64) {
+        e["window"] = json!(w);
+    }
+    Some(e)
 }
 
 /// 读管道任务：split(b'\n') 逐段读取 + from_utf8_lossy（与 history/claude.rs for_each_line

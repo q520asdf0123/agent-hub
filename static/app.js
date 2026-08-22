@@ -585,6 +585,10 @@ const state = {
   agentFilter: localStorage.getItem('ah-agent-filter') || '', // ''=全部 | claude | codex
   sageOn: localStorage.getItem('ah-sage') === '1',            // SAGE 智能路由开关
   sageFailed: null,       // 失败重路由记忆 {task, agents:[]}（成功后清空）
+  projOrder: (() => {
+    try { return JSON.parse(localStorage.getItem('ah-proj-order')) || []; }
+    catch (_) { return []; }
+  })(),                   // 项目拖拽排序（路径数组）
   runsIndex: {},          // session_id → {running, ok, error}（侧栏状态标识）
   modelsInfo: null,       // /api/models 解析结果（默认模型/思考强度展示用）
 };
@@ -904,6 +908,9 @@ async function loadProjects() {
   expandProjectFor(state.session);
 }
 
+/** 拖拽排序：正在拖动的项目组元素 */
+let dragProj = null;
+
 function renderProjects() {
   const listEl = $('#project-list');
   listEl.textContent = '';
@@ -911,7 +918,16 @@ function renderProjects() {
     listEl.appendChild(el('div', 'empty', t('还未导入项目，点「＋」从历史中选择')));
     return;
   }
-  for (const p of state.projects) {
+  // 用户自定义顺序（拖拽保存）优先；未记录的按后端顺序排在末尾
+  const order = state.projOrder;
+  const list = state.projects.slice().sort((a, b) => {
+    const ia = order.indexOf(a.path);
+    const ib = order.indexOf(b.path);
+    return (ia === -1 ? 1e9 : ia) - (ib === -1 ? 1e9 : ib);
+  });
+  for (const p of list) {
+    const grp = el('div', 'pgroup');
+    grp.dataset.path = p.path;
     const row = el('div', 'prow');
     row.appendChild(folderIcon());
     const name = el('span', 'prow-name', p.name || p.path);
@@ -929,12 +945,28 @@ function renderProjects() {
     if (state.expanded.has(p.path)) caret.classList.add('open');
     row.appendChild(caret);
     row.addEventListener('click', () => toggleProject(p.path));
-    listEl.appendChild(row);
+    // 拖拽排序：拖动标题行移动整组（含展开的会话）
+    row.draggable = true;
+    row.addEventListener('dragstart', (e) => {
+      dragProj = grp;
+      grp.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', p.path);
+    });
+    row.addEventListener('dragend', () => {
+      grp.classList.remove('dragging');
+      dragProj = null;
+      const cur = [...listEl.querySelectorAll('.pgroup')].map((g) => g.dataset.path);
+      state.projOrder = cur;
+      localStorage.setItem('ah-proj-order', JSON.stringify(cur));
+    });
+    grp.appendChild(row);
     if (state.expanded.has(p.path)) {
       const box = el('div', 'proj-sessions');
-      listEl.appendChild(box);
+      grp.appendChild(box);
       fillProjectSessions(box, p.path);
     }
+    listEl.appendChild(grp);
   }
 }
 
@@ -2271,12 +2303,14 @@ function fmtTok(n) {
   return String(n);
 }
 
-/** 上下文窗口大小：事件提供 > 模型发现 > 按模型名推断（[1m] → 1M，其余 200k） */
+/** 上下文窗口大小：事件提供 > 所选模型查表 > 模型发现 > 按模型名推断 */
 function contextWindowFor() {
   const u = stream && stream.usage;
   if (u && u.window) return u.window;
   const agent = currentAgent();
   const info = state.modelsInfo && state.modelsInfo[agent];
+  const w = info && info.windows && info.windows[modelFull()];
+  if (w) return w;
   if (info && info.context_window) return info.context_window;
   if (agent === 'claude') return /\[1m\]/i.test(modelFull()) ? 1000000 : 200000;
   return 0; // 未知则不显示占比
@@ -2302,11 +2336,12 @@ function renderUsageFromHistory(u, agent) {
   text += ' · ' + t('缓存') + ' ' + hit + '%';
   let tip =
     'input ' + input + ' + cache_read ' + cr + ' + cache_write ' + cw + '\noutput ' + out;
-  // 窗口：历史自带 > 模型发现 > 按会话模型名推断
+  // 窗口：历史自带 > 会话模型查表 > 模型发现 > 按会话模型名推断
   let win = u.window || 0;
   if (!win) {
     const info = state.modelsInfo && state.modelsInfo[agent];
-    if (info && info.context_window) win = info.context_window;
+    if (info && info.windows && info.windows[u.model || '']) win = info.windows[u.model];
+    else if (info && info.context_window) win = info.context_window;
     else if (agent === 'claude') win = /\[1m\]/i.test(u.model || '') ? 1000000 : 200000;
   }
   const ctx = u.context || 0;
@@ -3196,6 +3231,20 @@ function bindEvents() {
   });
   $('#head-projects').addEventListener('click', () => toggleGroup('projects'));
   $('#head-convs').addEventListener('click', () => toggleGroup('convs'));
+
+  // 项目拖拽排序：按鼠标位置把拖动中的组插到目标前/后（dragend 时持久化）
+  $('#project-list').addEventListener('dragover', (e) => {
+    if (!dragProj) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const pl = $('#project-list');
+    const after = [...pl.querySelectorAll('.pgroup:not(.dragging)')].find((g) => {
+      const r = g.getBoundingClientRect();
+      return e.clientY < r.top + r.height / 2;
+    });
+    if (after) pl.insertBefore(dragProj, after);
+    else pl.appendChild(dragProj);
+  });
 
   // 设置：语言切换
   $('#settings-btn').addEventListener('click', (e) => {

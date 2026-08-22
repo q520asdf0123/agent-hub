@@ -52,20 +52,15 @@ fn claude_models() -> AgentModels {
             }
         }
     }
-    // 官方别名兜底
-    for alias in ["fable", "opus", "sonnet", "haiku"] {
-        push_unique(&mut models, alias);
-    }
     models.truncate(MAX_MODELS + 4);
     // effortLevel 合法值来自 CLI 内置校验（zod enum）；默认值读全局 settings.json
     let default_effort = dirs::home_dir()
         .and_then(|h| fs::read_to_string(h.join(".claude").join("settings.json")).ok())
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
         .and_then(|v| v.get("effortLevel").and_then(|e| e.as_str()).map(String::from));
-    // [1m] 后缀 = 1M 上下文变体（本地可确定的唯一窗口信号）
+    // 本部署的 claude 流量走统一中转，全部模型均为 1M 窗口
     let windows = models
         .iter()
-        .filter(|m| m.to_lowercase().contains("[1m]"))
         .map(|m| (m.clone(), 1_000_000_i64))
         .collect();
     AgentModels {
