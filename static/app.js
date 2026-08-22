@@ -1279,6 +1279,11 @@ function applyGroupCollapse() {
 
 /** 侧栏 agent 过滤（左侧图标栏） */
 function filterSessions(sessions) {
+  // 协作子会话不进侧栏（在主会话右侧面板展示状态与入口）
+  const back = collabStoreLoad().back;
+  sessions = sessions.filter(
+    (s) => !back[s.agent + ':' + s.id] && !/^【协作(分工|复查|追问)】/.test(s.title || '')
+  );
   if (!state.agentFilter) return sessions;
   return sessions.filter((s) => s.agent === state.agentFilter);
 }
@@ -1373,6 +1378,7 @@ async function pollRuns() {
       if (r.session_id) state.runsIndex[r.session_id] = r;
     }
     refreshRunBadges();
+    renderCollabPanel(); // 子会话运行状态实时刷新
   } catch (_) {
     /* 忽略 */
   }
@@ -2310,6 +2316,7 @@ async function openSession(s) {
   setActiveRow(s.agent + ':' + s.id);
   showChat();
   setChatHead(state.session);
+  renderCollabPanel(); // 右侧子会话面板（无关联则隐藏）
   const ub = $('#usage-bar');
   if (ub) ub.classList.add('hidden'); // 历史会话无实时用量数据
   promptInput.placeholder = t('继续这个会话…');
@@ -2970,6 +2977,59 @@ async function discoverCollabLinks(s, tr, key) {
   return found;
 }
 
+/* ---------- 右侧协作子会话面板：状态 + 入口（子会话不进侧栏） ---------- */
+
+function renderCollabPanel() {
+  const panel = $('#collab-panel');
+  if (!panel) return;
+  const s = state.session;
+  const links = s && s.id ? collabStoreLoad().links[s.agent + ':' + s.id] || [] : [];
+  if (!links.length) {
+    panel.classList.add('hidden');
+    return;
+  }
+  panel.textContent = '';
+  panel.appendChild(
+    el('div', 'collab-panel-title', CUR_LANG === 'en' ? '🤝 Sub-sessions' : '🤝 协作子会话')
+  );
+  for (const ln of links) {
+    const i = ln.partner.indexOf(':');
+    const pAgent = ln.partner.slice(0, i);
+    const pId = ln.partner.slice(i + 1);
+    const row = el('div', 'collab-panel-row');
+    const dot = el('span', 'agent-dot ' + (AGENTS[pAgent] ? AGENTS[pAgent].cls : ''));
+    dot.appendChild(agentIcon(pAgent, 13));
+    row.appendChild(dot);
+    row.appendChild(
+      el(
+        'span',
+        'collab-panel-name',
+        ln.label + (ln.cats ? '·' + ln.cats : ln.kind === 'review' ? '·' + t('复查') : '')
+      )
+    );
+    const r = state.runsIndex[pId];
+    let stTxt;
+    let stCls;
+    if (r && r.running) {
+      stTxt = CUR_LANG === 'en' ? 'running' : '运行中';
+      stCls = 'run';
+    } else if (r && r.ok === false) {
+      stTxt = CUR_LANG === 'en' ? 'error' : '出错';
+      stCls = 'err';
+    } else {
+      stTxt = CUR_LANG === 'en' ? 'done' : '已完成';
+      stCls = 'ok';
+    }
+    row.appendChild(el('span', 'collab-panel-st ' + stCls, stTxt));
+    row.title = CUR_LANG === 'en' ? 'Open sub-session' : '点击打开子会话';
+    row.addEventListener('click', () =>
+      openSession({ agent: pAgent, id: pId, project: s.project, title: '' })
+    );
+    panel.appendChild(row);
+  }
+  panel.classList.remove('hidden');
+}
+
 /** 转录的最终回答文本（末条有实质内容的助手消息，补回注用） */
 function transcriptFinalText(tr) {
   const asst = (tr.messages || []).filter((m) => m.role === 'assistant');
@@ -3012,6 +3072,7 @@ async function stitchCollab(s, tr) {
     links = await discoverCollabLinks(s, tr, key); // 旧协作回溯配对
     if (!state.session || state.session.id !== s.id || state.session.agent !== s.agent) return;
   }
+  renderCollabPanel(); // 回溯配对可能新增关联 → 刷新右侧面板
   if (!links.length) return;
   for (const ln of links) {
     try {
