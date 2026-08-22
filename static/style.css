@@ -769,6 +769,20 @@ button { font-family: inherit; }
 
 /* 右侧协作子会话面板：悬浮在对话区右上，展示状态与入口 */
 #view-chat { position: relative; }
+
+/* 子会话返回按钮：悬浮在头部下方、内容区左上（与右侧面板对称） */
+#back-primary-btn {
+  position: absolute;
+  top: 64px;
+  left: 18px;
+  z-index: 30;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 5px 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+#back-primary-btn:hover { border-color: var(--border2); background: var(--hover); }
 #collab-panel {
   position: absolute;
   top: 64px;
