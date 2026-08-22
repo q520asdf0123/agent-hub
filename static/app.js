@@ -3275,6 +3275,15 @@ function bindEvents() {
   });
   $('#search-input').addEventListener('input', debounce(onSearch, 250));
 
+  // 多窗口同步：别的窗口改了权限/模型/思考/快速，本窗口立即跟随，
+  // 否则旧窗口后续任一次保存会把过期值写回去（快速开关"回答后失效"的根因）
+  window.addEventListener('storage', (e) => {
+    if (e.key === 'ah-prefs') {
+      loadAgentPrefs(currentAgent());
+      syncAgentUI();
+    }
+  });
+
   // 菜单关闭
   document.addEventListener('click', () => closeMenu());
   document.addEventListener('keydown', (e) => {
