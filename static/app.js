@@ -8,7 +8,7 @@ let CUR_LANG = 'zh';
 
 const I18N_EN = {
   '搜索会话': 'Search sessions', '新建会话': 'New session', '项目': 'Projects', '对话': 'Chats',
-  '在文本框中显示': 'Show in input', '移除': 'Remove',
+  '在文本框中显示': 'Show in input', '移除': 'Remove', '点击展开 / 收起': 'Click to expand / collapse',
   '搜索结果': 'Results', '技能': 'Skills', '图片': 'Image', '本地': 'Local', '收起': 'Collapse',
   '收起文件 ⌃': 'Collapse files ⌃', '已处理': 'Processed in', '(无标题)': '(untitled)',
   '暂无对话': 'No chats yet', '没有匹配的会话': 'No matching sessions', '搜索失败：': 'Search failed: ',
@@ -2496,20 +2496,62 @@ function finalizeCur() {
 
 /* ---------- 实时活动条：当前动作滑动更新（呼吸圆点表明仍在运行） ---------- */
 
+/** 工具参数摘要：JSON 里提取 command/file_path 等有效字段，不显示原始 JSON */
+function toolDetail(raw) {
+  const s = (raw || '').trim();
+  if (s.startsWith('{')) {
+    try {
+      const o = JSON.parse(s);
+      const v = o.command || o.file_path || o.path || o.pattern || o.query || o.url;
+      if (typeof v === 'string' && v) return v;
+    } catch (_) { /* 截断的 JSON 等，原样返回 */ }
+  }
+  return s;
+}
+
 function updateTicker(label, detail) {
   if (!stream) return;
   if (!stream.ticker) {
     const box = el('div', 'run-ticker');
     box.appendChild(el('span', 'run-ticker-dot'));
     box.appendChild(el('span', 'run-ticker-text'));
+    box.title = t('点击展开 / 收起');
+    box.addEventListener('click', () => {
+      if (!stream || !stream.ticker) return;
+      stream.tickerOpen = !stream.tickerOpen;
+      renderTickerContent(false);
+    });
     stream.ticker = box;
   }
-  const txt = stream.ticker.querySelector('.run-ticker-text');
-  txt.textContent = label + (detail ? '：' + detail : '');
-  txt.classList.remove('tick');
-  void txt.offsetWidth; // 重触发滑入动画
-  txt.classList.add('tick');
+  stream.tickerData = { label, detail: detail || '' };
+  renderTickerContent(true);
   stream.ctx.bodyEl.appendChild(stream.ticker); // 始终挪到当前末尾
+}
+
+/** 按展开状态渲染活动条：收起 = 单行省略；展开 = 完整内容（约 8 行内滚动） */
+function renderTickerContent(animate) {
+  if (!stream || !stream.ticker || !stream.tickerData) return;
+  const d = stream.tickerData;
+  const box = stream.ticker;
+  box.classList.toggle('open', !!stream.tickerOpen);
+  const txt = box.querySelector('.run-ticker-text');
+  let pre = box.querySelector('.run-ticker-pre');
+  if (stream.tickerOpen) {
+    txt.textContent = d.label;
+    if (!pre) {
+      pre = el('pre', 'run-ticker-pre');
+      box.appendChild(pre);
+    }
+    pre.textContent = d.detail || d.label;
+  } else {
+    if (pre) pre.remove();
+    txt.textContent = d.label + (d.detail ? '：' + snippet(d.detail.replace(/\s+/g, ' '), 90) : '');
+  }
+  if (animate) {
+    txt.classList.remove('tick');
+    void txt.offsetWidth; // 重触发滑入动画
+    txt.classList.add('tick');
+  }
 }
 
 function removeTicker() {
@@ -2649,7 +2691,7 @@ function handleEvent(ev) {
               : nm.includes('search') || nm.includes('grep') || nm.includes('glob') || nm.includes('find')
                 ? en ? 'Searching' : '正在搜索'
                 : (en ? 'Calling ' : '正在调用 ') + (ev.name || (en ? 'tool' : '工具'));
-      updateTicker(label, snippet((ev.text || '').replace(/\s+/g, ' '), 90));
+      updateTicker(label, toolDetail(ev.text || ''));
       stream.ctx.bodyEl.appendChild(cursorEl);
       break;
     }
