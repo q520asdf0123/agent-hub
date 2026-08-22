@@ -691,9 +691,10 @@ button { font-family: inherit; }
 }
 .chip.on:hover { color: var(--accent2); }
 
-/* 滑动开关 chip（快速 / 智能路由）：文案 + 滑轨圆钮 */
+/* 滑动开关 chip（快速 / 智能路由 / 记忆）：文案 + 滑轨圆钮 */
 #fast-btn,
-#sage-btn {
+#sage-btn,
+#mem-btn {
   display: inline-flex;
   align-items: center;
   gap: 7px;
