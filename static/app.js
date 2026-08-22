@@ -2245,6 +2245,15 @@ async function openSession(s) {
     if (!state.session || state.session.id !== s.id || state.session.agent !== s.agent) return; // 已切走
     chatMsgs.textContent = '';
     renderTranscript(chatMsgs, t);
+    // 该会话若有路由决策记录 → 在首条回答前重现决策卡（默认折叠）
+    const sd = sageStoreLoad()[s.agent + ':' + s.id];
+    if (sd) {
+      const card = sageCard(sd);
+      card.classList.remove('open');
+      const firstAsst = chatMsgs.querySelector('.msg-asst');
+      if (firstAsst) chatMsgs.insertBefore(card, firstAsst);
+      else chatMsgs.appendChild(card);
+    }
     state.histUsage = t.usage || null; // 供续聊/重连作为用量基线
     if (t.usage) renderUsageFromHistory(t.usage, s.agent); // 已完成会话的整场用量
     if (t.title) {
@@ -2452,8 +2461,34 @@ function finalizeCur() {
   stream.cur = null;
 }
 
+/* ---------- 实时活动条：当前动作滑动更新（呼吸圆点表明仍在运行） ---------- */
+
+function updateTicker(label, detail) {
+  if (!stream) return;
+  if (!stream.ticker) {
+    const box = el('div', 'run-ticker');
+    box.appendChild(el('span', 'run-ticker-dot'));
+    box.appendChild(el('span', 'run-ticker-text'));
+    stream.ticker = box;
+  }
+  const txt = stream.ticker.querySelector('.run-ticker-text');
+  txt.textContent = label + (detail ? '：' + detail : '');
+  txt.classList.remove('tick');
+  void txt.offsetWidth; // 重触发滑入动画
+  txt.classList.add('tick');
+  stream.ctx.bodyEl.appendChild(stream.ticker); // 始终挪到当前末尾
+}
+
+function removeTicker() {
+  if (stream && stream.ticker) {
+    stream.ticker.remove();
+    stream.ticker = null;
+  }
+}
+
 function finalizeStream() {
   finalizeCur();
+  removeTicker();
   cursorEl.remove();
   if (stream) {
     stream.ctx.bodyEl.classList.remove('streaming');
@@ -2522,6 +2557,7 @@ function handleEvent(ev) {
       break;
     case 'delta':
       if (!ev.text) break; // 空增量不创建也不追加块（claude 回合开头会先发 text 为空串的 delta）
+      removeTicker(); // 正文/思考流本身就是可见进度
       endToolGroup(stream.ctx);
       if (ev.channel === 'thinking') {
         const b = ensureStreamThinking();
@@ -2538,6 +2574,7 @@ function handleEvent(ev) {
       break;
     case 'text': {
       finalizeCur();
+      removeTicker();
       endToolGroup(stream.ctx);
       const d = el('div', 'md fade-in');
       renderMarkdown(d, ev.text || '');
@@ -2548,6 +2585,7 @@ function handleEvent(ev) {
     }
     case 'thinking':
       finalizeCur();
+      removeTicker();
       endToolGroup(stream.ctx);
       stream.ctx.bodyEl.appendChild(thinkingCard(ev.text || '', false));
       stream.ctx.bodyEl.appendChild(cursorEl);
@@ -2557,18 +2595,36 @@ function handleEvent(ev) {
       upsertPlan(stream.ctx, ev.items || []);
       stream.ctx.bodyEl.appendChild(cursorEl);
       break;
-    case 'tool_use':
+    case 'tool_use': {
       finalizeCur();
       appendToolUse(stream.ctx, ev.name || '工具', ev.text || '');
+      // 实时活动条：滑动展示当前正在执行的动作
+      const nm = (ev.name || '').toLowerCase();
+      const en = CUR_LANG === 'en';
+      const label =
+        nm.includes('bash') || nm.includes('shell') || nm.includes('command') || nm.includes('exec')
+          ? en ? 'Running' : '正在运行'
+          : nm.includes('read')
+            ? en ? 'Reading' : '正在读取'
+            : nm.includes('edit') || nm.includes('write') || nm.includes('patch')
+              ? en ? 'Editing' : '正在编辑'
+              : nm.includes('search') || nm.includes('grep') || nm.includes('glob') || nm.includes('find')
+                ? en ? 'Searching' : '正在搜索'
+                : (en ? 'Calling ' : '正在调用 ') + (ev.name || (en ? 'tool' : '工具'));
+      updateTicker(label, snippet((ev.text || '').replace(/\s+/g, ' '), 90));
       stream.ctx.bodyEl.appendChild(cursorEl);
       break;
+    }
     case 'tool_result':
       finalizeCur();
       appendToolResult(stream.ctx, ev.text || '');
       stream.ctx.bodyEl.appendChild(cursorEl);
       break;
     case 'file_edit':
-      if (ev.path) stream.ctx.fileEdits.add(ev.path);
+      if (ev.path) {
+        stream.ctx.fileEdits.add(ev.path);
+        updateTicker(CUR_LANG === 'en' ? 'Editing' : '正在编辑', ev.path);
+      }
       break;
     case 'usage': {
       const u = stream.usage;
@@ -2712,6 +2768,28 @@ function showToast(msg) {
     cur.classList.add('gone');
     setTimeout(() => cur.remove(), 350);
   }, 3200);
+}
+
+/* ---------- 路由决策按会话持久化（刷新/重开会话后重现决策卡） ---------- */
+
+function sageStoreLoad() {
+  try {
+    return JSON.parse(localStorage.getItem('ah-sage-decisions')) || {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function sageStoreSave(key, d) {
+  const all = sageStoreLoad();
+  // 展示不需要 decision_blob（体积大），去掉再存
+  const lean = { ...d };
+  delete lean.decision_blob;
+  delete all[key];
+  all[key] = lean;
+  const keys = Object.keys(all);
+  while (keys.length > 120) delete all[keys.shift()]; // 只留最近 120 条
+  localStorage.setItem('ah-sage-decisions', JSON.stringify(all));
 }
 
 /** SAGE 决策卡片（折叠，标题展示模式与执行者） */
@@ -3179,6 +3257,10 @@ async function onSend() {
     // 会话文件已落盘，刷新侧栏（列表与项目计数）
     loadConvs();
     loadProjects();
+    // 路由决策按会话持久化：刷新/重开会话后决策卡可重现
+    if (sageInfo && state.session && state.session.id) {
+      sageStoreSave(state.session.agent + ':' + state.session.id, sageInfo);
+    }
   }
   // 门控：搭档名下需求权重 ≥ 0.25 → 库原生的分工流水线；否则复查回注
   const partnerWeight = collab
