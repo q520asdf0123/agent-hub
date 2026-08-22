@@ -62,6 +62,12 @@ fn claude_models() -> AgentModels {
         .and_then(|h| fs::read_to_string(h.join(".claude").join("settings.json")).ok())
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
         .and_then(|v| v.get("effortLevel").and_then(|e| e.as_str()).map(String::from));
+    // [1m] 后缀 = 1M 上下文变体（本地可确定的唯一窗口信号）
+    let windows = models
+        .iter()
+        .filter(|m| m.to_lowercase().contains("[1m]"))
+        .map(|m| (m.clone(), 1_000_000_i64))
+        .collect();
     AgentModels {
         default,
         models,
@@ -70,6 +76,7 @@ fn claude_models() -> AgentModels {
             .to_vec(),
         default_effort,
         context_window: None, // 前端按模型名推断（[1m] → 1M，其余 200k）
+        windows,
     }
 }
 
@@ -82,6 +89,7 @@ fn codex_models() -> AgentModels {
     let mut context_window: Option<i64> = None;
     let mut models: Vec<String> = Vec::new();
     let mut effort_set: Vec<String> = Vec::new();
+    let mut windows = std::collections::HashMap::new();
     let Some(h) = dirs::home_dir() else {
         return AgentModels {
             default,
@@ -89,6 +97,7 @@ fn codex_models() -> AgentModels {
             efforts: Vec::new(),
             default_effort,
             context_window: None,
+            windows,
         };
     };
     let codex = h.join(".codex");
@@ -120,6 +129,9 @@ fn codex_models() -> AgentModels {
                     for m in arr {
                         if let Some(slug) = m.get("slug").and_then(|s| s.as_str()) {
                             push_unique(&mut models, slug);
+                            if let Some(w) = m.get("context_window").and_then(|w| w.as_i64()) {
+                                windows.insert(slug.to_string(), w);
+                            }
                         }
                         if let Some(levels) =
                             m.get("supported_reasoning_levels").and_then(|l| l.as_array())
@@ -157,12 +169,17 @@ fn codex_models() -> AgentModels {
             .map(|e| e.to_string())
             .collect()
     };
+    // config.toml 的全局 model_context_window 补给默认模型（目录值优先）
+    if let (Some(w), Some(d)) = (context_window, default.as_ref()) {
+        windows.entry(d.clone()).or_insert(w);
+    }
     AgentModels {
         default,
         models,
         efforts,
         default_effort,
         context_window,
+        windows,
     }
 }
 

@@ -642,6 +642,7 @@ function showMenu(anchor, items, onPick) {
     const btn = el('button', 'menu-item' + (it.checked ? ' checked' : ''));
     btn.type = 'button';
     btn.appendChild(el('span', 'menu-label', it.label));
+    if (it.tag) btn.appendChild(el('span', 'menu-tag', it.tag));
     if (it.hint) btn.appendChild(el('span', 'menu-hint', it.hint));
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -1214,7 +1215,7 @@ function filterSessions(sessions) {
 function setAgentFilter(f) {
   state.agentFilter = f;
   localStorage.setItem('ah-agent-filter', f);
-  document.querySelectorAll('.rail-btn').forEach((b) => {
+  document.querySelectorAll('.rail-btn[data-filter]').forEach((b) => {
     b.classList.toggle('active', (b.dataset.filter || '') === f);
   });
   // 新会话的默认 agent 跟随过滤选择
@@ -3129,11 +3130,18 @@ function bindEvents() {
     } catch (_) {
       /* 发现失败时仍提供 默认/自定义 */
     }
+    // 支持 1M 上下文的模型加徽标（claude 按 [1m] 名字、codex 读目录 context_window）
+    const oneM = (m) =>
+      m &&
+      (((info.windows || {})[m] || 0) >= 1000000 || /\[1m\]/i.test(m))
+        ? '1M'
+        : '';
     const items = [
       {
         value: null,
         label: t('默认模型'),
         hint: info.default || '',
+        tag: oneM(info.default),
         checked: state.model === null,
       },
     ];
@@ -3141,12 +3149,13 @@ function bindEvents() {
       items.push({
         value: m,
         label: m,
+        tag: oneM(m),
         hint: m === info.default ? t('全局默认') : '',
         checked: m === state.model,
       });
     }
     if (state.model && !info.models.includes(state.model)) {
-      items.splice(1, 0, { value: state.model, label: state.model, checked: true });
+      items.splice(1, 0, { value: state.model, label: state.model, tag: oneM(state.model), checked: true });
     }
     items.push({ value: '__custom__', label: '自定义…' });
     showMenu(anchor, items, (it) => {
@@ -3270,7 +3279,7 @@ function init() {
   });
   applyGroupCollapse();
   // 恢复上次的 agent 过滤选择
-  document.querySelectorAll('.rail-btn').forEach((b) => {
+  document.querySelectorAll('.rail-btn[data-filter]').forEach((b) => {
     b.classList.toggle('active', (b.dataset.filter || '') === state.agentFilter);
   });
   if (state.agentFilter && AGENTS[state.agentFilter]) state.agent = state.agentFilter;

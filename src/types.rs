@@ -107,6 +107,8 @@ pub struct AgentModels {
     pub default_effort: Option<String>,
     /// 模型上下文窗口（token 数，能探明时提供）
     pub context_window: Option<i64>,
+    /// 各模型的上下文窗口（模型名 → token 数；claude 按 [1m] 名字、codex 读目录）
+    pub windows: std::collections::HashMap<String, i64>,
 }
 
 #[derive(Serialize, Clone, Debug)]

@@ -610,6 +610,19 @@ button { font-family: inherit; }
   white-space: nowrap;
   max-width: 200px;
 }
+.menu-item .menu-tag {
+  flex: none;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  line-height: 15px;
+  font-weight: 600;
+  color: var(--accent, #e8964a);
+  background: rgba(232, 150, 74, 0.14);
+  border: 1px solid rgba(232, 150, 74, 0.35);
+}
+
 .menu-item .menu-hint {
   flex: 1;
   color: #6e6e6e;
