@@ -212,8 +212,8 @@ pub async fn stream_chat(registry: &RunRegistry, req: ChatReq) -> Response {
     let mem_note: Option<&str> = if req.memory.unwrap_or(false) {
         match memory_proxy_conf() {
             None => Some("记忆代理未配置（~/.agenthub/memory.json），本次直连"),
-            Some(c) if req.agent == "codex" && (c.team.is_none() || c.agent.is_none()) => {
-                Some("codex 记忆需绑定 Team/Agent（面板创建后配置 memory.json），本次直连")
+            Some(_) if req.agent == "codex" => {
+                Some("记忆暂仅支持 Claude（codex 的无界面接入被上游门控阻断），本次直连")
             }
             _ => None,
         }
@@ -468,36 +468,11 @@ fn memory_proxy_conf() -> Option<MemConf> {
     })
 }
 
-/// codex 记忆接入：-c 内联定义指向 TDAI proxy 的 model_provider（不动全局配置）。
-/// 仅在 team+agent 已配置时启用——headless 过不了交互门控，头部自动绑定是前提。
-fn push_memory_provider(args: &mut Vec<String>, req: &ChatReq) {
-    if req.agent != "codex" || !req.memory.unwrap_or(false) {
-        return;
-    }
-    let Some(c) = memory_proxy_conf() else { return };
-    let (Some(team), Some(agent)) = (c.team.as_deref(), c.agent.as_deref()) else {
-        return; // 未绑定团队资产 → 直连（spawn 处会发提示事件）
-    };
-    let (proxy, key) = (&c.proxy, &c.key);
-    let mut kvs = vec![
-        "model_provider=\"tdai-memory\"".to_string(),
-        "model_providers.tdai-memory.name=\"TDAI Memory\"".to_string(),
-        "model_providers.tdai-memory.wire_api=\"responses\"".to_string(),
-        format!("model_providers.tdai-memory.base_url=\"{proxy}/codex/default\""),
-        format!("model_providers.tdai-memory.experimental_bearer_token=\"{key}\""),
-        format!("model_providers.tdai-memory.http_headers.\"x-team-id\"=\"{team}\""),
-        format!("model_providers.tdai-memory.http_headers.\"x-agent-id\"=\"{agent}\""),
-    ];
-    if let Some(task) = c.task.as_deref() {
-        kvs.push(format!(
-            "model_providers.tdai-memory.http_headers.\"x-task-id\"=\"{task}\""
-        ));
-    }
-    for kv in kvs {
-        args.push("-c".to_string());
-        args.push(kv);
-    }
-}
+/// codex 记忆接入：暂禁用。实测上游代理对 codex 的会话初始化有硬性门控——
+/// 无界面（exec）首轮必被「请切 Plan 模式」提示占用，任务不执行；
+/// x-team-id/x-agent-id 头部自动绑定对 codex 路径也不生效（claude 路径正常）。
+/// 待上游支持 headless 或实现预热轮方案后再启用（-c 内联 provider 代码见 git 历史）。
+fn push_memory_provider(_args: &mut [String], _req: &ChatReq) {}
 
 /// codex 快速档：service_tier（TUI 的 /fast 持久化的同一官方配置键；
 /// on→fast / off→standard，显式两态覆盖全局默认，让界面开关所见即所得）。
