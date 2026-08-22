@@ -52,16 +52,25 @@ fn claude_models() -> AgentModels {
             }
         }
     }
+    // 官方在售完整模型名兜底（本地未用过也可选）
+    push_unique(&mut models, "claude-sonnet-5");
     models.truncate(MAX_MODELS + 4);
     // effortLevel 合法值来自 CLI 内置校验（zod enum）；默认值读全局 settings.json
     let default_effort = dirs::home_dir()
         .and_then(|h| fs::read_to_string(h.join(".claude").join("settings.json")).ok())
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
         .and_then(|v| v.get("effortLevel").and_then(|e| e.as_str()).map(String::from));
-    // 本部署的 claude 流量走统一中转，全部模型均为 1M 窗口
+    // 窗口按官方口径（2026-03 起 1M GA）：Fable/Opus/Sonnet 家族 1M，Haiku 200k
     let windows = models
         .iter()
-        .map(|m| (m.clone(), 1_000_000_i64))
+        .map(|m| {
+            let w = if m.to_lowercase().contains("haiku") {
+                200_000_i64
+            } else {
+                1_000_000_i64
+            };
+            (m.clone(), w)
+        })
         .collect();
     AgentModels {
         default,
