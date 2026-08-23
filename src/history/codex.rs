@@ -139,10 +139,16 @@ fn parent_history_messages(
                     ));
                 }
             }
-            Some("response_item") => handle_response_item(&mut messages, payload, ts),
+            Some("response_item") => {
+                let before = messages.len();
+                handle_response_item(&mut messages, payload, ts);
+                backfill_pos(&mut messages, before, &v); // 继承区也可作分叉点
+            }
             Some("event_msg") => {
                 if payload.get("type").and_then(Value::as_str) != Some("token_count") {
+                    let before = messages.len();
                     handle_event_msg(&mut messages, payload, ts);
+                    backfill_pos(&mut messages, before, &v);
                 }
             }
             _ => {}
@@ -170,6 +176,13 @@ fn backfill_pos(messages: &mut [ChatMessage], from: usize, line: &Value) {
 /// fork 的同款存储结构：forked_from_id + history_base），零模型调用。
 /// cut_ord=None 表示分叉到会话末尾。返回新会话 id。
 pub fn fork_at(parent_id: &str, cut_ord: Option<u64>) -> Result<String, String> {
+    fork_at_depth(parent_id, cut_ord, 6)
+}
+
+fn fork_at_depth(parent_id: &str, cut_ord: Option<u64>, depth: u8) -> Result<String, String> {
+    if depth == 0 {
+        return Err("分叉链过深".to_string());
+    }
     let path = rollout_path_for(parent_id).ok_or("未找到父会话文件")?;
     let raw = fs::read(&path).map_err(|e| format!("读取父会话失败: {e}"))?;
     // 扫描行，定位截断点的 (end_ordinal_exclusive, end_byte_offset) 与父 meta
@@ -191,6 +204,21 @@ pub fn fork_at(parent_id: &str, cut_ord: Option<u64>) -> Result<String, String> 
         };
         if meta.is_none() && v.get("type").and_then(Value::as_str) == Some("session_meta") {
             meta = v.get("payload").cloned();
+            // 截断点落在继承区（早于本文件首行 ordinal）→ 沿分叉链到祖先会话上分叉
+            if let (Some(cut), Some(first_ord)) =
+                (cut_ord, v.get("ordinal").and_then(Value::as_u64))
+            {
+                if cut < first_ord {
+                    if let Some(fid) = meta
+                        .as_ref()
+                        .and_then(|m| m.get("forked_from_id"))
+                        .and_then(Value::as_str)
+                    {
+                        return fork_at_depth(fid, cut_ord, depth - 1);
+                    }
+                    return Err("截断点早于会话起点".to_string());
+                }
+            }
         }
         let ord = v.get("ordinal").and_then(Value::as_u64);
         match (cut_ord, ord) {
