@@ -186,7 +186,7 @@ button { font-family: inherit; }
 /* 会话行 */
 .srow {
   display: flex;
-  align-items: center;
+  align-items: flex-start; /* 标题多行时图标/时间贴顶 */
   gap: 8px;
   margin: 1px 8px;
   padding: 6px 9px;
@@ -205,9 +205,9 @@ button { font-family: inherit; }
 .srow-title {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal; /* 完整展示标题，自动换行 */
+  overflow-wrap: anywhere;
+  line-height: 1.4;
   font-size: 13px;
   color: var(--fg2);
 }
