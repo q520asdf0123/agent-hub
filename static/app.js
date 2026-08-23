@@ -4625,6 +4625,36 @@ function bindEvents() {
     }
   });
 
+  // 侧栏宽度拖拽（分隔条左右滑动，宽度持久化）
+  (() => {
+    const rez = $('#side-resizer');
+    const sb = $('#sidebar');
+    if (!rez || !sb) return;
+    const saved = parseInt(localStorage.getItem('ah-sidebar-w') || '', 10);
+    if (saved >= 220 && saved <= 640) sb.style.width = saved + 'px';
+    let dragging = false;
+    rez.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      dragging = true;
+      rez.classList.add('dragging');
+      document.body.style.userSelect = 'none';
+      document.body.style.cursor = 'col-resize';
+    });
+    document.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      const w = Math.max(220, Math.min(640, e.clientX));
+      sb.style.width = w + 'px';
+    });
+    document.addEventListener('mouseup', () => {
+      if (!dragging) return;
+      dragging = false;
+      rez.classList.remove('dragging');
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      localStorage.setItem('ah-sidebar-w', parseInt(sb.style.width, 10) || 300);
+    });
+  })();
+
   // 菜单关闭
   document.addEventListener('click', () => closeMenu());
   document.addEventListener('keydown', (e) => {

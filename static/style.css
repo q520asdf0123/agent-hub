@@ -75,6 +75,18 @@ button { font-family: inherit; }
 #app { display: flex; height: 100vh; }
 
 /* ============ 左侧栏 ============ */
+#side-resizer {
+  width: 5px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  background: transparent;
+  margin-left: -3px; /* 覆在侧栏边线上，不占视觉宽度 */
+  z-index: 60;
+  transition: background 0.15s;
+}
+#side-resizer:hover,
+#side-resizer.dragging { background: rgba(232, 150, 74, 0.45); }
+
 #sidebar {
   width: 300px;
   flex-shrink: 0;
