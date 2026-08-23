@@ -731,6 +731,7 @@ pub async fn sessions(
     Query(query): Query<SessionsQuery>,
 ) -> impl IntoResponse {
     let mut list = collect_all_sessions().await;
+    apply_title_overrides(&mut list);
     if let Some(p) = query
         .project
         .as_deref()
@@ -804,7 +805,16 @@ pub async fn session_detail(Query(q): Query<SessionQuery>) -> Response {
         }
     };
     match result {
-        Ok(t) => Json(t).into_response(),
+        Ok(mut t) => {
+            // 分叉等场景的标题覆盖
+            if let Some(ov) = titles_load()
+                .get(&format!("{}:{}", t.agent, t.id))
+                .and_then(|v| v.as_str())
+            {
+                t.title = ov.to_string();
+            }
+            Json(t).into_response()
+        }
         Err(e) => (StatusCode::NOT_FOUND, Json(json!({"error": e}))).into_response(),
     }
 }
@@ -884,6 +894,35 @@ pub async fn fork_at(Json(body): Json<ForkAtReq>) -> Response {
     };
     match result {
         Ok(new_id) => {
+            // 分叉标题：父标题 + " (n)"（Codex Desktop 同款习惯）
+            let mut list = collect_all_sessions().await;
+            apply_title_overrides(&mut list);
+            let parent_title = list
+                .iter()
+                .find(|s| s.agent == body.agent && s.id == body.id)
+                .map(|s| s.title.trim().to_string())
+                .unwrap_or_default();
+            if !parent_title.is_empty() {
+                // 去掉父标题自身的 " (n)" 后缀作为基名
+                let base = match parent_title.rfind(" (") {
+                    Some(i)
+                        if parent_title.ends_with(')')
+                            && parent_title[i + 2..parent_title.len() - 1]
+                                .chars()
+                                .all(|c| c.is_ascii_digit()) =>
+                    {
+                        parent_title[..i].to_string()
+                    }
+                    _ => parent_title.clone(),
+                };
+                let taken: std::collections::HashSet<String> =
+                    list.iter().map(|s| s.title.trim().to_string()).collect();
+                let mut n = 2;
+                while taken.contains(&format!("{base} ({n})")) {
+                    n += 1;
+                }
+                title_override_set(&body.agent, &new_id, &format!("{base} ({n})"));
+            }
             invalidate_sessions_cache();
             Json(json!({ "ok": true, "id": new_id })).into_response()
         }
@@ -964,6 +1003,46 @@ pub async fn stop_run(
     Json(body): Json<StopReq>,
 ) -> impl IntoResponse {
     Json(json!({ "ok": state.runs.stop(&body.run_id) }))
+}
+
+// ---------- 标题覆盖（分叉会话等取不到标题的场景） ----------
+
+/// ~/.agenthub/titles.json：{"<agent>:<id>": "标题"}
+fn titles_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".agenthub").join("titles.json"))
+}
+
+fn titles_load() -> serde_json::Map<String, serde_json::Value> {
+    titles_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default()
+}
+
+fn titles_save(map: &serde_json::Map<String, serde_json::Value>) {
+    if let Some(p) = titles_path() {
+        let _ = p.parent().map(std::fs::create_dir_all);
+        let _ = std::fs::write(p, serde_json::Value::Object(map.clone()).to_string());
+    }
+}
+
+pub fn title_override_set(agent: &str, id: &str, title: &str) {
+    let mut map = titles_load();
+    map.insert(format!("{agent}:{id}"), json!(title));
+    titles_save(&map);
+}
+
+fn apply_title_overrides(list: &mut [SessionSummary]) {
+    let map = titles_load();
+    if map.is_empty() {
+        return;
+    }
+    for s in list.iter_mut() {
+        if let Some(t) = map.get(&format!("{}:{}", s.agent, s.id)).and_then(|v| v.as_str()) {
+            s.title = t.to_string();
+        }
+    }
 }
 
 // ---------- 内部工具 ----------
