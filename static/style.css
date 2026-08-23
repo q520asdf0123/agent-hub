@@ -76,16 +76,49 @@ button { font-family: inherit; }
 
 /* ============ 左侧栏 ============ */
 #side-resizer {
-  width: 5px;
+  position: relative;
+  width: 8px;
   flex-shrink: 0;
   cursor: col-resize;
   background: transparent;
-  margin-left: -3px; /* 覆在侧栏边线上，不占视觉宽度 */
+  margin-left: -4px; /* 覆在侧栏边线上，不占视觉宽度 */
   z-index: 60;
-  transition: background 0.15s;
 }
-#side-resizer:hover,
-#side-resizer.dragging { background: rgba(232, 150, 74, 0.45); }
+/* 悬停：细高亮线 */
+#side-resizer::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 2px;
+  border-radius: 2px;
+  background: rgba(232, 150, 74, 0.35);
+  opacity: 0;
+  transition: opacity 0.18s;
+}
+/* 居中圆角抓手 */
+#side-resizer::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 4px;
+  height: 44px;
+  border-radius: 999px;
+  background: var(--border2);
+  opacity: 0;
+  transition: opacity 0.18s, background 0.18s, height 0.18s;
+}
+#side-resizer:hover::before,
+#side-resizer.dragging::before { opacity: 1; }
+#side-resizer:hover::after { opacity: 1; }
+#side-resizer.dragging::after {
+  opacity: 1;
+  height: 68px;
+  background: var(--accent2);
+}
 
 #sidebar {
   width: 300px;
