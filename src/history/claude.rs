@@ -436,6 +436,7 @@ pub fn transcript(project: &str, session_id: &str) -> Result<Transcript, String>
                             text: format!("⚠ 运行报错：{}", truncate_chars(trimmed, SUMMARY_MAX)),
                             name: None,
                         }],
+                        pos: None,
                     });
                 }
                 return true;
@@ -478,6 +479,11 @@ pub fn transcript(project: &str, session_id: &str) -> Result<Transcript, String>
                 role,
                 ts: ts_s,
                 blocks,
+                // 中点分叉定位：该消息来源行的 uuid
+                pos: v
+                    .get("uuid")
+                    .and_then(Value::as_str)
+                    .map(|u| serde_json::json!(u)),
             });
         }
         true
@@ -505,6 +511,42 @@ pub fn transcript(project: &str, session_id: &str) -> Result<Transcript, String>
         messages,
         usage,
     })
+}
+
+/// 中点分叉：复制父会话文件到指定消息 uuid（含）截断，逐行替换 sessionId，
+/// 生成可 --resume 的新会话文件。cut_uuid=None 表示复制全量。返回新会话 id。
+pub fn fork_at(parent_id: &str, cut_uuid: Option<&str>) -> Result<String, String> {
+    let path = session_file_for(parent_id).ok_or("未找到父会话文件")?;
+    let new_id = crate::history::new_uuid(false);
+    let mut out = String::new();
+    let mut hit_cut = false;
+    for_each_line(&path, |line| {
+        out.push_str(&line.replace(parent_id, &new_id));
+        out.push('\n');
+        if let Some(cut) = cut_uuid {
+            if let Ok(v) = serde_json::from_str::<Value>(line) {
+                if v.get("uuid").and_then(Value::as_str) == Some(cut) {
+                    hit_cut = true;
+                    return false; // 截断：该消息之后不带入
+                }
+            }
+        }
+        true
+    });
+    if let Some(cut) = cut_uuid {
+        if !hit_cut {
+            return Err(format!("未找到截断消息 {cut}"));
+        }
+    }
+    if out.is_empty() {
+        return Err("父会话文件为空".to_string());
+    }
+    let dest = path
+        .parent()
+        .ok_or("父目录缺失")?
+        .join(format!("{new_id}.jsonl"));
+    fs::write(&dest, out).map_err(|e| format!("写入失败: {e}"))?;
+    Ok(new_id)
 }
 
 /// 按会话 id 定位会话文件（删除等操作用）。

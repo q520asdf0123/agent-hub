@@ -60,12 +60,15 @@ pub struct Transcript {
     pub usage: Option<serde_json::Value>,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Clone, Debug, Default)]
 pub struct ChatMessage {
     /// "user" | "assistant" | "system"
     pub role: String,
     pub ts: Option<String>,
     pub blocks: Vec<Block>,
+    /// 中点分叉定位：codex=行 ordinal（数字），claude=行 uuid（字符串）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pos: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Clone, Debug)]

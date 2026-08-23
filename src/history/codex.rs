@@ -157,6 +157,91 @@ fn parent_history_messages(
     messages
 }
 
+/// 中点分叉定位回填：本行产出的消息标记来源行 ordinal。
+fn backfill_pos(messages: &mut [ChatMessage], from: usize, line: &Value) {
+    if let Some(ord) = line.get("ordinal").and_then(Value::as_u64) {
+        for m in messages[from..].iter_mut() {
+            m.pos = Some(serde_json::json!(ord));
+        }
+    }
+}
+
+/// 中点分叉：合成一个引用父会话到指定 ordinal 的分叉 rollout（codex 原生
+/// fork 的同款存储结构：forked_from_id + history_base），零模型调用。
+/// cut_ord=None 表示分叉到会话末尾。返回新会话 id。
+pub fn fork_at(parent_id: &str, cut_ord: Option<u64>) -> Result<String, String> {
+    let path = rollout_path_for(parent_id).ok_or("未找到父会话文件")?;
+    let raw = fs::read(&path).map_err(|e| format!("读取父会话失败: {e}"))?;
+    // 扫描行，定位截断点的 (end_ordinal_exclusive, end_byte_offset) 与父 meta
+    let mut meta: Option<Value> = None;
+    let mut end_ord: Option<u64> = None;
+    let mut end_byte: u64 = 0;
+    let mut offset: u64 = 0;
+    for seg in raw.split(|b| *b == b'\n') {
+        let seg_len = seg.len() as u64 + 1;
+        let line = String::from_utf8_lossy(seg);
+        let line = line.trim();
+        if line.is_empty() {
+            offset += seg_len;
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            offset += seg_len;
+            continue;
+        };
+        if meta.is_none() && v.get("type").and_then(Value::as_str) == Some("session_meta") {
+            meta = v.get("payload").cloned();
+        }
+        let ord = v.get("ordinal").and_then(Value::as_u64);
+        match (cut_ord, ord) {
+            (Some(cut), Some(o)) if o > cut => break, // 截断点之后不计
+            _ => {}
+        }
+        offset += seg_len;
+        end_byte = offset.min(raw.len() as u64);
+        if let Some(o) = ord {
+            end_ord = Some(o + 1);
+        }
+    }
+    let mut meta = meta.ok_or("父会话缺少 session_meta")?;
+    let end_ord = end_ord.ok_or("父会话行缺少 ordinal（版本过旧？）")?;
+    let new_id = crate::history::new_uuid(true);
+    let (iso, (y, mo, d, h, mi, s)) = crate::history::now_utc_parts();
+    if let Some(o) = meta.as_object_mut() {
+        o.insert("id".into(), serde_json::json!(new_id));
+        o.insert("session_id".into(), serde_json::json!(new_id));
+        o.insert("timestamp".into(), serde_json::json!(iso));
+        o.insert("forked_from_id".into(), serde_json::json!(parent_id));
+        o.insert("history_mode".into(), serde_json::json!("paginated"));
+        o.insert(
+            "history_base".into(),
+            serde_json::json!({
+                "thread_id": parent_id,
+                "end_ordinal_exclusive": end_ord,
+                "end_byte_offset": end_byte,
+            }),
+        );
+    }
+    let envelope = serde_json::json!({
+        "timestamp": iso,
+        "ordinal": end_ord,
+        "type": "session_meta",
+        "payload": meta,
+    });
+    let dir = codex_root()
+        .ok_or("无 home 目录")?
+        .join("sessions")
+        .join(format!("{y:04}"))
+        .join(format!("{mo:02}"))
+        .join(format!("{d:02}"));
+    fs::create_dir_all(&dir).map_err(|e| format!("创建目录失败: {e}"))?;
+    let file = dir.join(format!(
+        "rollout-{y:04}-{mo:02}-{d:02}T{h:02}-{mi:02}-{s:02}-{new_id}.jsonl"
+    ));
+    fs::write(&file, envelope.to_string() + "\n").map_err(|e| format!("写入失败: {e}"))?;
+    Ok(new_id)
+}
+
 /// 按会话 id 定位 rollout 文件（文件名含 id；多处匹配取 mtime 最新）。
 pub fn rollout_path_for(session_id: &str) -> Option<PathBuf> {
     if session_id.is_empty() {
@@ -481,8 +566,16 @@ pub fn transcript(session_id: &str) -> Result<Transcript, String> {
                     ));
                 }
             }
-            Some("response_item") => handle_response_item(&mut messages, payload, ts),
-            Some("event_msg") => handle_event_msg(&mut messages, payload, ts),
+            Some("response_item") => {
+                let before = messages.len();
+                handle_response_item(&mut messages, payload, ts);
+                backfill_pos(&mut messages, before, &v);
+            }
+            Some("event_msg") => {
+                let before = messages.len();
+                handle_event_msg(&mut messages, payload, ts);
+                backfill_pos(&mut messages, before, &v);
+            }
             Some("compacted") => messages.push(ChatMessage {
                 role: "system".to_string(),
                 ts,
@@ -491,6 +584,7 @@ pub fn transcript(session_id: &str) -> Result<Transcript, String> {
                     text: "上下文已压缩".to_string(),
                     name: None,
                 }],
+                pos: None,
             }),
             // turn_context / 其他行跳过
             _ => {}
@@ -510,6 +604,7 @@ pub fn transcript(session_id: &str) -> Result<Transcript, String> {
                     text: "⑂ 分支点 · 以上为源会话继承的历史".to_string(),
                     name: None,
                 }],
+                pos: None,
             });
             parent.append(&mut messages);
             messages = parent;
@@ -549,6 +644,7 @@ fn push_block(messages: &mut Vec<ChatMessage>, role: &str, ts: Option<String>, b
         role: role.to_string(),
         ts,
         blocks: vec![block],
+        pos: None,
     });
 }
 
@@ -786,6 +882,7 @@ fn handle_event_msg(messages: &mut Vec<ChatMessage>, payload: &Value, ts: Option
                     text: "⚠ 回合被中止（进程被终止，任务未完成）".to_string(),
                     name: None,
                 }],
+                pos: None,
             });
         }
         // 运行报错：error / turn_failed 事件，或 task_complete 携带错误
@@ -814,6 +911,7 @@ fn handle_event_msg(messages: &mut Vec<ChatMessage>, payload: &Value, ts: Option
                         text: format!("⚠ 运行报错：{}", truncate_chars(m, SUMMARY_MAX)),
                         name: None,
                     }],
+                    pos: None,
                 });
             }
         }

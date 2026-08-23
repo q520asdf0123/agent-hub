@@ -41,6 +41,7 @@ async fn main() {
         .route("/api/runs", get(api::runs_list))
         .route("/api/stop", post(api::stop_run))
         .route("/api/session/delete", post(api::delete_session))
+        .route("/api/fork-at", post(api::fork_at))
         .route("/api/sage", post(api::sage_route))
         .route("/api/sage/outcome", post(api::sage_outcome))
         .route("/api/file", get(api::file))

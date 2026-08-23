@@ -862,6 +862,39 @@ pub struct StopReq {
     pub run_id: String,
 }
 
+// ---------- POST /api/fork-at（中点分叉：从指定消息处分叉出新会话） ----------
+
+#[derive(Deserialize)]
+pub struct ForkAtReq {
+    pub agent: String,
+    pub id: String,
+    /// codex=消息来源行 ordinal（数字）；claude=行 uuid（字符串）；null=会话末尾
+    pub pos: Option<serde_json::Value>,
+}
+
+pub async fn fork_at(Json(body): Json<ForkAtReq>) -> Response {
+    let result = match body.agent.as_str() {
+        "codex" => {
+            crate::history::codex::fork_at(&body.id, body.pos.as_ref().and_then(|v| v.as_u64()))
+        }
+        "claude" => {
+            crate::history::claude::fork_at(&body.id, body.pos.as_ref().and_then(|v| v.as_str()))
+        }
+        _ => Err("未知 agent".to_string()),
+    };
+    match result {
+        Ok(new_id) => {
+            invalidate_sessions_cache();
+            Json(json!({ "ok": true, "id": new_id })).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
 // ---------- POST /api/session/delete（会话移入回收目录，可恢复） ----------
 
 #[derive(Deserialize)]

@@ -14,6 +14,8 @@ const I18N_EN = {
   '分支到新会话：基于当前会话状态分叉，原会话不受影响': 'Fork to a new session from the current state (original untouched)',
   '会话尚未保存，无法分支': 'Session not saved yet — cannot fork',
   '🗑 删除会话': '🗑 Delete session', '已删除': 'Deleted', '删除失败：': 'Delete failed: ',
+  '分支失败：': 'Fork failed: ',
+  '从此消息处分叉出新会话（之后的内容不带入，原会话不受影响）': 'Fork a new session from this message (later content excluded; original untouched)',
   '会话有任务在运行，先停止再删除': 'A task is running in this session — stop it first',
   '确定删除该会话？文件将移入回收目录（可恢复）': 'Delete this session? The file moves to a recoverable trash folder.',
   '🧠 记忆': '🧠 Memory',
@@ -2280,7 +2282,7 @@ function upsertPlan(ctx, items) {
   renderPlanInto(ctx.planCard, items);
 }
 
-function renderAssistantMsg(container, blocks) {
+function renderAssistantMsg(container, blocks, pos) {
   const bodyEl = el('div', 'msg-asst');
   container.appendChild(bodyEl);
   const ctx = { bodyEl, lastTool: null, lastGroup: null, planCard: null, fileEdits: new Set() };
@@ -2317,7 +2319,9 @@ function renderAssistantMsg(container, blocks) {
     .filter((b) => b.kind === 'text' && b.text)
     .map((b) => b.text)
     .join('\n');
-  appendMsgActions(bodyEl, txt);
+  const bar = appendMsgActions(bodyEl, txt);
+  // 有定位信息（行 ordinal/uuid）→ 支持真·从此消息处分叉
+  if (pos !== undefined && pos !== null) bar.appendChild(makeForkBtn(pos));
   return ctx;
 }
 
@@ -2339,9 +2343,9 @@ function appendMsgActions(bodyEl, text) {
   return bar;
 }
 
-/** 立即分支：CLI 的 fork 需携带指令才生成新会话 → 就绪确认指令触发，
- *  init 返回新 id 后当前视图自动切到分支（原会话不受影响）。 */
-function doForkNow() {
+/** 分叉：pos=null 从会话末尾；否则从指定消息处（codex=行 ordinal，claude=行 uuid）。
+ *  由后端合成分叉文件（codex 引用式 / claude 复制截断），零模型调用即时完成。 */
+async function forkAt(pos) {
   if (!state.session || !state.session.id) {
     showToast(t('会话尚未保存，无法分支'));
     return;
@@ -2350,20 +2354,35 @@ function doForkNow() {
     showToast(CUR_LANG === 'en' ? 'A task is running — fork after it finishes' : '任务运行中，结束后再分支');
     return;
   }
-  promptInput.value =
-    '/fork ' +
-    (CUR_LANG === 'en'
-      ? 'This is a new session forked from the original. Briefly confirm you are ready.'
-      : '这是从原会话分支出的新会话，请简短确认已就绪，等待后续指令。');
-  showToast(CUR_LANG === 'en' ? '⑂ Forking into a new session…' : '⑂ 正在分支出新会话…');
-  onSend();
+  const s = state.session;
+  try {
+    const r = await api.post('/api/fork-at', {
+      agent: s.agent,
+      id: s.id,
+      project: s.project,
+      pos: pos === undefined ? null : pos,
+    });
+    showToast(CUR_LANG === 'en' ? '⑂ Forked — now in the new session' : '⑂ 已分支，当前已切到新会话');
+    loadConvs();
+    renderProjects();
+    openSession({ agent: s.agent, id: r.id, project: s.project, title: '' });
+  } catch (e) {
+    alert(t('分支失败：') + e.message);
+  }
 }
 
-function makeForkBtn() {
+function doForkNow() {
+  forkAt(null);
+}
+
+function makeForkBtn(pos) {
   const forkBtn = el('button', 'msg-act', '⑂');
   forkBtn.type = 'button';
-  forkBtn.title = t('分支到新会话：基于当前会话状态分叉，原会话不受影响');
-  forkBtn.addEventListener('click', doForkNow);
+  forkBtn.title =
+    pos !== null && pos !== undefined
+      ? t('从此消息处分叉出新会话（之后的内容不带入，原会话不受影响）')
+      : t('分支到新会话：基于当前会话状态分叉，原会话不受影响');
+  forkBtn.addEventListener('click', () => forkAt(pos === undefined ? null : pos));
   return forkBtn;
 }
 
@@ -2429,7 +2448,7 @@ function renderTranscript(container, t) {
       } else {
         // 文件改动跨消息累计，整轮只在末尾出一张汇总卡
         const carry = lastAsst ? lastAsst.fileEdits : null;
-        lastAsst = renderAssistantMsg(container, blocks);
+        lastAsst = renderAssistantMsg(container, blocks, m.pos);
         if (carry && carry.size) carry.forEach((p) => lastAsst.fileEdits.add(p));
       }
     } else if (m.role === 'user') {
@@ -2439,9 +2458,6 @@ function renderTranscript(container, t) {
     }
   }
   flushFilesCard(lastAsst);
-  // ⑂ 只挂在最后一条回复（CLI 从会话末尾分叉，历史消息处放按钮会误导）
-  const bars = container.querySelectorAll('.msg-actions');
-  if (bars.length) bars[bars.length - 1].appendChild(makeForkBtn());
 }
 
 /** 重连后台运行：只跟新事件，结束后重载权威转录补齐 */
