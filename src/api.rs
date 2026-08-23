@@ -862,6 +862,70 @@ pub struct StopReq {
     pub run_id: String,
 }
 
+// ---------- POST /api/session/delete（会话移入回收目录，可恢复） ----------
+
+#[derive(Deserialize)]
+pub struct DeleteSessionReq {
+    pub agent: String,
+    pub id: String,
+}
+
+pub async fn delete_session(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<DeleteSessionReq>,
+) -> Response {
+    // 运行中的会话拒绝删除
+    let running = state.runs.list_all().iter().any(|(_, r)| {
+        !r.is_done() && r.session_id.lock().unwrap().as_deref() == Some(body.id.as_str())
+    });
+    if running {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "会话有任务在运行，先停止再删除" })),
+        )
+            .into_response();
+    }
+    let path = match body.agent.as_str() {
+        "claude" => crate::history::claude::session_file_for(&body.id),
+        "codex" => crate::history::codex::rollout_path_for(&body.id),
+        _ => None,
+    };
+    let Some(path) = path else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "未找到会话文件" })),
+        )
+            .into_response();
+    };
+    // 不硬删：移入 ~/.agenthub/trash/，误删可手动恢复
+    let trash = dirs::home_dir()
+        .map(|h| h.join(".agenthub").join("trash"))
+        .unwrap_or_default();
+    if std::fs::create_dir_all(&trash).is_err() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "创建回收目录失败" })),
+        )
+            .into_response();
+    }
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| body.id.clone());
+    let dest = trash.join(format!("{}-{}", body.agent, name));
+    match std::fs::rename(&path, &dest) {
+        Ok(_) => {
+            invalidate_sessions_cache();
+            Json(json!({ "ok": true, "trash": dest.to_string_lossy() })).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("移动到回收目录失败: {e}") })),
+        )
+            .into_response(),
+    }
+}
+
 pub async fn stop_run(
     State(state): State<Arc<AppState>>,
     Json(body): Json<StopReq>,

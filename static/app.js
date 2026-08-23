@@ -13,6 +13,9 @@ const I18N_EN = {
   '复制正文': 'Copy text', '已复制': 'Copied', '复制失败': 'Copy failed',
   '分支到新会话：基于当前会话状态分叉，原会话不受影响': 'Fork to a new session from the current state (original untouched)',
   '会话尚未保存，无法分支': 'Session not saved yet — cannot fork',
+  '🗑 删除会话': '🗑 Delete session', '已删除': 'Deleted', '删除失败：': 'Delete failed: ',
+  '会话有任务在运行，先停止再删除': 'A task is running in this session — stop it first',
+  '确定删除该会话？文件将移入回收目录（可恢复）': 'Delete this session? The file moves to a recoverable trash folder.',
   '🧠 记忆': '🧠 Memory',
   '🤝 协作分工任务书': '🤝 Work-division brief', '🤝 分工产出回注': '🤝 Consolidated partner output',
   '🤝 复查意见回注': '🤝 Review feedback', '🤝 协作复查任务书': '🤝 Review brief',
@@ -1188,6 +1191,30 @@ function sessionRow(s) {
   row.appendChild(timeEl);
   row.title = (s.title || t('(无标题)')) + '\n' + (s.project || '') + (s.archived ? '\n（已归档）' : '');
   row.addEventListener('click', () => openSession(s));
+  // 右键：删除会话（移入 ~/.agenthub/trash 回收目录，可恢复）
+  row.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    showMenu(row, [{ value: 'del', label: t('🗑 删除会话') }], async (it) => {
+      if (it.value !== 'del') return;
+      const r = state.runsIndex[s.id];
+      if (r && r.running) {
+        showToast(t('会话有任务在运行，先停止再删除'));
+        return;
+      }
+      if (!confirm(t('确定删除该会话？文件将移入回收目录（可恢复）'))) return;
+      try {
+        await api.post('/api/session/delete', { agent: s.agent, id: s.id });
+        if (state.session && state.session.id === s.id) onNewSession();
+        loadConvs();
+        loadProjects();
+        renderProjects();
+        showToast(t('已删除'));
+      } catch (e2) {
+        alert(t('删除失败：') + e2.message);
+      }
+    });
+  });
   return row;
 }
 

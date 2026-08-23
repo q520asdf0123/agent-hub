@@ -507,6 +507,12 @@ pub fn transcript(project: &str, session_id: &str) -> Result<Transcript, String>
     })
 }
 
+/// 按会话 id 定位会话文件（删除等操作用）。
+pub fn session_file_for(session_id: &str) -> Option<PathBuf> {
+    let root = dirs::home_dir()?.join(".claude").join("projects");
+    find_session_file(&root, session_id)
+}
+
 /// 在全部项目目录中按文件名搜索 `<session_id>.jsonl`（顶层）。
 fn find_session_file(root: &Path, session_id: &str) -> Option<PathBuf> {
     let file_name = format!("{session_id}.jsonl");
