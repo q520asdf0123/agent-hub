@@ -9,6 +9,7 @@ let CUR_LANG = 'zh';
 const I18N_EN = {
   '搜索会话': 'Search sessions', '新建会话': 'New session', '项目': 'Projects', '对话': 'Chats',
   '在文本框中显示': 'Show in input', '移除': 'Remove', '点击展开 / 收起': 'Click to expand / collapse',
+  '复查': 'review', '🤝 追问分派任务书': '🤝 Delegated follow-up brief',
   '🧠 记忆': '🧠 Memory',
   '🤝 协作分工任务书': '🤝 Work-division brief', '🤝 分工产出回注': '🤝 Consolidated partner output',
   '🤝 复查意见回注': '🤝 Review feedback', '🤝 协作复查任务书': '🤝 Review brief',
@@ -1455,6 +1456,7 @@ async function pollRuns() {
     if (sig !== lastRunningSig) {
       lastRunningSig = sig;
       loadConvs();
+      loadProjects(); // 会话计数也跟着变
       renderProjects();
       // 分工子会话状态变化（如跑完）→ 重缝合当前会话（补回注按钮及时浮现）
       if (state.session && state.session.id && !state.streaming) {
@@ -1739,6 +1741,7 @@ const COLLAB_PREFIXES = [
   ['【协作汇总】', '🤝 分工产出回注'],
   ['【协作复查回注】', '🤝 复查意见回注'],
   ['【协作复查】', '🤝 协作复查任务书'],
+  ['【协作追问】', '🤝 追问分派任务书'],
 ];
 
 function collabInjectCard(text) {
@@ -3093,6 +3096,12 @@ async function discoverCollabLinks(s, tr, key) {
 /** 子会话最新结论回注主会话：跳回主会话，让主 agent 消化并落实后续 */
 async function feedBackToPrimary() {
   if (state.streaming || !state.backPrimary || !state.session) return;
+  // 子会话还在运行时不回注（会拿到半截结论）
+  const running = state.runsIndex[state.session.id];
+  if (running && running.running) {
+    showToast(CUR_LANG === 'en' ? 'Sub-session still running — wait for it to finish' : '子会话还在运行中，等它跑完再回注');
+    return;
+  }
   const sub = {
     agent: state.session.agent,
     id: state.session.id,
@@ -4508,7 +4517,9 @@ function bindEvents() {
 async function checkActiveRuns() {
   try {
     const runs = await api.get('/api/runs');
-    const r = runs.find((x) => x.running && x.session_id);
+    // 优先主会话运行（协作子运行的 prompt 以【协作 开头），避免开局落到子会话
+    const active = runs.filter((x) => x.running && x.session_id);
+    const r = active.find((x) => !/^【协作/.test(x.prompt || '')) || active[0];
     if (r) {
       openSession({
         agent: r.agent,
