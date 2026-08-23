@@ -181,6 +181,9 @@ button { font-family: inherit; }
   margin: 0 8px 4px 16px;
   border-left: 1px solid var(--border);
   padding-left: 4px;
+  max-height: 46vh; /* 超出高度内部滚动，不无限撑长侧栏 */
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 /* 会话行 */
