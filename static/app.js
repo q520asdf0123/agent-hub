@@ -2362,6 +2362,11 @@ async function forkAt(pos) {
       project: s.project,
       pos: pos === undefined ? null : pos,
     });
+    // 分支 = 父会话当时的样子：协作子会话关联一并继承（归属仍在父会话）
+    const st = collabStoreLoad();
+    for (const ln of st.links[s.agent + ':' + s.id] || []) {
+      collabLinkSave(s.agent + ':' + r.id, { ...ln }, ln.partner);
+    }
     showToast(CUR_LANG === 'en' ? '⑂ Forked — now in the new session' : '⑂ 已分支，当前已切到新会话');
     loadConvs();
     renderProjects();
@@ -3137,7 +3142,8 @@ function collabLinkSave(primaryKey, entry, partnerKey) {
   if (!st.links[primaryKey].some((e) => e.partner === entry.partner)) {
     st.links[primaryKey].push(entry);
   }
-  st.back[partnerKey] = primaryKey;
+  // 返回入口归属首个主会话（分叉复制关联时不抢走父会话的归属）
+  if (!st.back[partnerKey]) st.back[partnerKey] = primaryKey;
   const keys = Object.keys(st.links);
   while (keys.length > 80) {
     delete st.links[keys.shift()]; // 只留最近 80 个主会话的关联
