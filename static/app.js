@@ -2294,7 +2294,8 @@ function renderAssistantMsg(container, blocks) {
   return ctx;
 }
 
-/** 助手消息悬浮操作栏：复制正文 / 从当前会话分支出新会话 */
+/** 助手消息悬浮操作栏：每条消息可复制；⑂ 分支只挂在最后一条回复
+ *（CLI 仅支持从会话当前末尾分叉，挂历史消息会误导「从该处分叉」）。 */
 function appendMsgActions(bodyEl, text) {
   const bar = el('div', 'msg-actions');
   const copyBtn = el('button', 'msg-act', '⧉');
@@ -2307,6 +2308,11 @@ function appendMsgActions(bodyEl, text) {
       .catch(() => showToast(t('复制失败')));
   });
   bar.appendChild(copyBtn);
+  bodyEl.appendChild(bar);
+  return bar;
+}
+
+function makeForkBtn() {
   const forkBtn = el('button', 'msg-act', '⑂');
   forkBtn.type = 'button';
   forkBtn.title = t('分支到新会话：基于当前会话状态分叉，原会话不受影响');
@@ -2329,8 +2335,7 @@ function appendMsgActions(bodyEl, text) {
     showToast(CUR_LANG === 'en' ? '⑂ Forking into a new session…' : '⑂ 正在分支出新会话…');
     onSend();
   });
-  bar.appendChild(forkBtn);
-  bodyEl.appendChild(bar);
+  return forkBtn;
 }
 
 /** 返回新的 lastAsst（用户真实输入会开启新回合 → null） */
@@ -2405,6 +2410,9 @@ function renderTranscript(container, t) {
     }
   }
   flushFilesCard(lastAsst);
+  // ⑂ 只挂在最后一条回复（CLI 从会话末尾分叉，历史消息处放按钮会误导）
+  const bars = container.querySelectorAll('.msg-actions');
+  if (bars.length) bars[bars.length - 1].appendChild(makeForkBtn());
 }
 
 /** 重连后台运行：只跟新事件，结束后重载权威转录补齐 */
@@ -2775,9 +2783,10 @@ function removeTicker() {
 function finalizeStream() {
   finalizeCur();
   removeTicker();
-  // 流式结束的消息也挂操作栏（复制/分支）
+  // 流式结束的消息也挂操作栏（复制 + 分支——它就是当前最后一条）
   if (stream && stream.finalText && stream.ctx && !stream.ctx.bodyEl.querySelector('.msg-actions')) {
-    appendMsgActions(stream.ctx.bodyEl, stream.finalText.trim());
+    const bar = appendMsgActions(stream.ctx.bodyEl, stream.finalText.trim());
+    bar.appendChild(makeForkBtn());
   }
   cursorEl.remove();
   if (stream) {
