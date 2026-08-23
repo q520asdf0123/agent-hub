@@ -828,6 +828,29 @@ button { font-family: inherit; }
   animation: ticker-pulse 1.1s ease-in-out infinite;
 }
 
+/* 助手消息悬浮操作栏：复制 / 分支（悬停显现） */
+.msg-asst { position: relative; }
+.msg-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.msg-asst:hover .msg-actions { opacity: 1; }
+.msg-act {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--dim);
+  border-radius: 6px;
+  width: 26px;
+  height: 22px;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+.msg-act:hover { color: var(--fg2); border-color: var(--border2); background: var(--hover); }
+
 /* 协作缝合段：左侧细线标识子会话来源；跳转分隔线可点击 */
 .collab-stitch {
   border-left: 2px solid rgba(232, 150, 74, 0.35);

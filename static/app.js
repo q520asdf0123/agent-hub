@@ -10,6 +10,9 @@ const I18N_EN = {
   '搜索会话': 'Search sessions', '新建会话': 'New session', '项目': 'Projects', '对话': 'Chats',
   '在文本框中显示': 'Show in input', '移除': 'Remove', '点击展开 / 收起': 'Click to expand / collapse',
   '复查': 'review', '🤝 追问分派任务书': '🤝 Delegated follow-up brief',
+  '复制正文': 'Copy text', '已复制': 'Copied', '复制失败': 'Copy failed',
+  '分支到新会话：基于当前会话状态分叉，原会话不受影响': 'Fork to a new session from the current state (original untouched)',
+  '会话尚未保存，无法分支': 'Session not saved yet — cannot fork',
   '🧠 记忆': '🧠 Memory',
   '🤝 协作分工任务书': '🤝 Work-division brief', '🤝 分工产出回注': '🤝 Consolidated partner output',
   '🤝 复查意见回注': '🤝 Review feedback', '🤝 协作复查任务书': '🤝 Review brief',
@@ -2283,7 +2286,47 @@ function renderAssistantMsg(container, blocks) {
       bodyEl.appendChild(imageEl(b.text));
     }
   }
+  const txt = blocks
+    .filter((b) => b.kind === 'text' && b.text)
+    .map((b) => b.text)
+    .join('\n');
+  appendMsgActions(bodyEl, txt);
   return ctx;
+}
+
+/** 助手消息悬浮操作栏：复制正文 / 从当前会话分支出新会话 */
+function appendMsgActions(bodyEl, text) {
+  const bar = el('div', 'msg-actions');
+  const copyBtn = el('button', 'msg-act', '⧉');
+  copyBtn.type = 'button';
+  copyBtn.title = t('复制正文');
+  copyBtn.addEventListener('click', () => {
+    navigator.clipboard
+      .writeText(text || '')
+      .then(() => showToast(t('已复制')))
+      .catch(() => showToast(t('复制失败')));
+  });
+  bar.appendChild(copyBtn);
+  const forkBtn = el('button', 'msg-act', '⑂');
+  forkBtn.type = 'button';
+  forkBtn.title = t('分支到新会话：基于当前会话状态分叉，原会话不受影响');
+  forkBtn.addEventListener('click', () => {
+    if (!state.session || !state.session.id) {
+      showToast(t('会话尚未保存，无法分支'));
+      return;
+    }
+    promptInput.value = '/fork ';
+    autoGrow();
+    promptInput.focus();
+    promptInput.setSelectionRange(promptInput.value.length, promptInput.value.length);
+    showToast(
+      CUR_LANG === 'en'
+        ? 'Type the instruction to run on the fork, then send'
+        : '输入分支后要执行的指令，发送即分叉出新会话'
+    );
+  });
+  bar.appendChild(forkBtn);
+  bodyEl.appendChild(bar);
 }
 
 /** 返回新的 lastAsst（用户真实输入会开启新回合 → null） */
@@ -2728,6 +2771,10 @@ function removeTicker() {
 function finalizeStream() {
   finalizeCur();
   removeTicker();
+  // 流式结束的消息也挂操作栏（复制/分支）
+  if (stream && stream.finalText && stream.ctx && !stream.ctx.bodyEl.querySelector('.msg-actions')) {
+    appendMsgActions(stream.ctx.bodyEl, stream.finalText.trim());
+  }
   cursorEl.remove();
   if (stream) {
     stream.ctx.bodyEl.classList.remove('streaming');
