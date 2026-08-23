@@ -2315,15 +2315,19 @@ function appendMsgActions(bodyEl, text) {
       showToast(t('会话尚未保存，无法分支'));
       return;
     }
-    promptInput.value = '/fork ';
-    autoGrow();
-    promptInput.focus();
-    promptInput.setSelectionRange(promptInput.value.length, promptInput.value.length);
-    showToast(
-      CUR_LANG === 'en'
-        ? 'Type the instruction to run on the fork, then send'
-        : '输入分支后要执行的指令，发送即分叉出新会话'
-    );
+    if (state.streaming) {
+      showToast(CUR_LANG === 'en' ? 'A task is running — fork after it finishes' : '任务运行中，结束后再分支');
+      return;
+    }
+    // CLI 的 fork 需携带一条指令才会生成新会话 → 用就绪确认指令立即触发，
+    // init 返回新 id 后当前视图自动切到分支（原会话不受影响）
+    promptInput.value =
+      '/fork ' +
+      (CUR_LANG === 'en'
+        ? 'This is a new session forked from the original. Briefly confirm you are ready.'
+        : '这是从原会话分支出的新会话，请简短确认已就绪，等待后续指令。');
+    showToast(CUR_LANG === 'en' ? '⑂ Forking into a new session…' : '⑂ 正在分支出新会话…');
+    onSend();
   });
   bar.appendChild(forkBtn);
   bodyEl.appendChild(bar);
