@@ -484,7 +484,7 @@ fn content_text(content: Option<&Value>) -> String {
         })
         .filter_map(|i| i.get("text").and_then(Value::as_str))
         .map(|t| t.trim())
-        .filter(|t| !t.is_empty() && !t.starts_with("<image "))
+        .filter(|t| !t.is_empty() && !t.starts_with("<image ") && *t != "</image>")
         .collect();
     texts.join("\n")
 }
