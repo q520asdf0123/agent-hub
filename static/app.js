@@ -1179,7 +1179,9 @@ function sessionRow(s) {
   row.appendChild(dot);
   row.appendChild(el('span', 'srow-title', s.title || t('(无标题)')));
   applyRunBadge(row, state.runsIndex[s.id]);
-  row.appendChild(el('span', 'srow-time', relTime(s.updated || s.created)));
+  const timeEl = el('span', 'srow-time', relTime(s.updated || s.created));
+  timeEl.dataset.ts = s.updated || s.created || ''; // 供定时器原地刷新相对时间
+  row.appendChild(timeEl);
   row.title = (s.title || t('(无标题)')) + '\n' + (s.project || '') + (s.archived ? '\n（已归档）' : '');
   row.addEventListener('click', () => openSession(s));
   return row;
@@ -4559,6 +4561,13 @@ function init() {
   checkActiveRuns();
   pollRuns();
   setInterval(pollRuns, 5000); // 侧栏运行状态标识轮询
+  // 相对时间原地刷新：渲染时算好的「刚刚/N 分钟前」不会自己走，
+  // 页面久挂不重载列表就会停在旧值——每分钟按 data-ts 重算一遍
+  setInterval(() => {
+    document.querySelectorAll('.srow-time[data-ts]').forEach((n) => {
+      if (n.dataset.ts) n.textContent = relTime(n.dataset.ts);
+    });
+  }, 60000);
   // 预取模型信息：让「默认」态直接展示实际默认模型与思考强度
   getModels()
     .then((all) => {
