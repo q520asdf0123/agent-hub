@@ -468,6 +468,8 @@ fn extract_cmd(args: &str) -> Option<String> {
 }
 
 /// content[] 中 input_text / output_text / text 的 text 拼接。
+/// -i 图片附件会插入 `<image name=... path=...>` 标记文本段——剔除，
+/// 否则整段文本以 `<` 开头会被注入过滤误杀（标题与正文都取不到）。
 fn content_text(content: Option<&Value>) -> String {
     let Some(Value::Array(items)) = content else {
         return String::new();
@@ -481,7 +483,8 @@ fn content_text(content: Option<&Value>) -> String {
             )
         })
         .filter_map(|i| i.get("text").and_then(Value::as_str))
-        .filter(|t| !t.is_empty())
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty() && !t.starts_with("<image "))
         .collect();
     texts.join("\n")
 }
