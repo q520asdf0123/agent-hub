@@ -3149,6 +3149,11 @@ function collabLinkSave(primaryKey, entry, partnerKey) {
  *  子会话标题以【协作分工/复查】开头，且首条消息含主会话的原任务文本 → 配对。
  *  命中后回写存储，下次直接命中不再扫描。 */
 async function discoverCollabLinks(s, tr, key) {
+  // 分叉会话不做回溯配对：继承内容与父会话相同，会把父会话的子会话错配过来
+  const isFork = (tr.messages || []).some((m) =>
+    (m.blocks || []).some((b) => b.kind === 'divider' && (b.text || '').includes('分支点'))
+  );
+  if (isFork) return [];
   const um = (tr.messages || []).find(
     (m) =>
       m.role === 'user' &&
@@ -3167,8 +3172,14 @@ async function discoverCollabLinks(s, tr, key) {
   } catch (_) {
     return [];
   }
+  // 已归属其他主会话的子会话不再匹配（一个子会话只属于一个主会话）
+  const back0 = collabStoreLoad().back;
   const cands = sessions
-    .filter((x) => x.id !== s.id && /^【协作(分工|复查)】/.test(x.title || ''))
+    .filter((x) => {
+      if (x.id === s.id || !/^【协作(分工|复查)】/.test(x.title || '')) return false;
+      const owner = back0[x.agent + ':' + x.id];
+      return !owner || owner === key;
+    })
     .slice(0, 8);
   const found = [];
   for (const c of cands) {
