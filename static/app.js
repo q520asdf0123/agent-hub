@@ -603,10 +603,6 @@ const state = {
   sageFailed: null,       // 失败重路由记忆 {task, agents:[]}（成功后清空）
   pendingSage: null,      // 待持久化的路由决策（init 拿到会话 id 即存）
   memOn: localStorage.getItem('ah-mem') === '1',              // TDAI 记忆代理开关
-  projOrder: (() => {
-    try { return JSON.parse(localStorage.getItem('ah-proj-order')) || []; }
-    catch (_) { return []; }
-  })(),                   // 项目拖拽排序（路径数组）
   runsIndex: {},          // session_id → {running, ok, error}（侧栏状态标识）
   modelsInfo: null,       // /api/models 解析结果（默认模型/思考强度展示用）
 };
@@ -957,9 +953,6 @@ async function loadProjects() {
   expandProjectFor(state.session);
 }
 
-/** 拖拽排序：正在拖动的项目组元素 */
-let dragProj = null;
-
 function renderProjects() {
   const listEl = $('#project-list');
   listEl.textContent = '';
@@ -967,13 +960,15 @@ function renderProjects() {
     listEl.appendChild(el('div', 'empty', t('还未导入项目，点「＋」从历史中选择')));
     return;
   }
-  // 用户自定义顺序（拖拽保存）优先；未记录的按后端顺序排在末尾
-  const order = state.projOrder;
-  const list = state.projects.slice().sort((a, b) => {
-    const ia = order.indexOf(a.path);
-    const ib = order.indexOf(b.path);
-    return (ia === -1 ? 1e9 : ia) - (ib === -1 ? 1e9 : ib);
-  });
+  // 固定按文件夹名排序，不随活跃度变动
+  const list = state.projects
+    .slice()
+    .sort((a, b) =>
+      (a.name || a.path).localeCompare(b.name || b.path, 'zh-Hans-CN', {
+        numeric: true,
+        sensitivity: 'base',
+      })
+    );
   for (const p of list) {
     const grp = el('div', 'pgroup');
     grp.dataset.path = p.path;
@@ -994,21 +989,6 @@ function renderProjects() {
     if (state.expanded.has(p.path)) caret.classList.add('open');
     row.appendChild(caret);
     row.addEventListener('click', () => toggleProject(p.path));
-    // 拖拽排序：拖动标题行移动整组（含展开的会话）
-    row.draggable = true;
-    row.addEventListener('dragstart', (e) => {
-      dragProj = grp;
-      grp.classList.add('dragging');
-      e.dataTransfer.effectAllowed = 'move';
-      e.dataTransfer.setData('text/plain', p.path);
-    });
-    row.addEventListener('dragend', () => {
-      grp.classList.remove('dragging');
-      dragProj = null;
-      const cur = [...listEl.querySelectorAll('.pgroup')].map((g) => g.dataset.path);
-      state.projOrder = cur;
-      localStorage.setItem('ah-proj-order', JSON.stringify(cur));
-    });
     grp.appendChild(row);
     if (state.expanded.has(p.path)) {
       const box = el('div', 'proj-sessions');
@@ -4543,20 +4523,6 @@ function bindEvents() {
   });
   $('#head-projects').addEventListener('click', () => toggleGroup('projects'));
   $('#head-convs').addEventListener('click', () => toggleGroup('convs'));
-
-  // 项目拖拽排序：按鼠标位置把拖动中的组插到目标前/后（dragend 时持久化）
-  $('#project-list').addEventListener('dragover', (e) => {
-    if (!dragProj) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-    const pl = $('#project-list');
-    const after = [...pl.querySelectorAll('.pgroup:not(.dragging)')].find((g) => {
-      const r = g.getBoundingClientRect();
-      return e.clientY < r.top + r.height / 2;
-    });
-    if (after) pl.insertBefore(dragProj, after);
-    else pl.appendChild(dragProj);
-  });
 
   // 设置：语言切换
   $('#settings-btn').addEventListener('click', (e) => {
