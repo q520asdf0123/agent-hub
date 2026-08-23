@@ -88,6 +88,75 @@ fn collect_files() -> Vec<(PathBuf, SystemTime, bool)> {
     out
 }
 
+/// 分叉会话的父历史：读取父 rollout 到分叉点（优先 ordinal，缺则按字节偏移），
+/// 只收集消息（用量由分叉会话自己的 token_count 延续，不重复聚合）。
+/// 父会话自身也可能是分叉 → 递归拼接，depth 限深防环。
+fn parent_history_messages(
+    parent_id: &str,
+    ord_limit: Option<u64>,
+    byte_limit: Option<u64>,
+    depth: u8,
+) -> Vec<ChatMessage> {
+    if depth == 0 {
+        return Vec::new();
+    }
+    let Some(path) = rollout_path_for(parent_id) else {
+        return Vec::new();
+    };
+    let mut messages: Vec<ChatMessage> = Vec::new();
+    let mut fork_ref: Option<(String, Option<u64>, Option<u64>)> = None;
+    let mut consumed: u64 = 0;
+    for_each_line(&path, |line| {
+        if let Some(limit) = byte_limit {
+            if consumed >= limit {
+                return false;
+            }
+        }
+        consumed += line.len() as u64 + 1; // 行 + 换行
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            return true;
+        };
+        if let (Some(limit), Some(ord)) = (ord_limit, v.get("ordinal").and_then(Value::as_u64)) {
+            if ord >= limit {
+                return false;
+            }
+        }
+        let ts = v.get("timestamp").and_then(Value::as_str).map(String::from);
+        let Some(payload) = v.get("payload") else {
+            return true;
+        };
+        match v.get("type").and_then(Value::as_str) {
+            Some("session_meta") => {
+                if let Some(fid) = payload.get("forked_from_id").and_then(Value::as_str) {
+                    fork_ref = Some((
+                        fid.to_string(),
+                        payload
+                            .pointer("/history_base/end_ordinal_exclusive")
+                            .and_then(Value::as_u64),
+                        payload
+                            .pointer("/history_base/end_byte_offset")
+                            .and_then(Value::as_u64),
+                    ));
+                }
+            }
+            Some("response_item") => handle_response_item(&mut messages, payload, ts),
+            Some("event_msg") => {
+                if payload.get("type").and_then(Value::as_str) != Some("token_count") {
+                    handle_event_msg(&mut messages, payload, ts);
+                }
+            }
+            _ => {}
+        }
+        true
+    });
+    if let Some((fid, ord, bytes)) = fork_ref {
+        let mut out = parent_history_messages(&fid, ord, bytes, depth - 1);
+        out.append(&mut messages);
+        return out;
+    }
+    messages
+}
+
 /// 按会话 id 定位 rollout 文件（文件名含 id；多处匹配取 mtime 最新）。
 pub fn rollout_path_for(session_id: &str) -> Option<PathBuf> {
     if session_id.is_empty() {
@@ -360,6 +429,7 @@ pub fn transcript(session_id: &str) -> Result<Transcript, String> {
     let (mut u_ctx, mut u_win) = (0i64, 0i64);
     let mut first_ts: Option<String> = None;
     let mut last_ts: Option<String> = None;
+    let mut fork_ref: Option<(String, Option<u64>, Option<u64>)> = None;
     for_each_line(&path, |line| {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             return true; // 单行解析失败跳过，不中断
@@ -397,6 +467,20 @@ pub fn transcript(session_id: &str) -> Result<Transcript, String> {
             return true;
         }
         match v.get("type").and_then(Value::as_str) {
+            Some("session_meta") => {
+                // 分叉会话不复制历史，只引用父会话（forked_from_id + history_base）
+                if let Some(fid) = payload.get("forked_from_id").and_then(Value::as_str) {
+                    fork_ref = Some((
+                        fid.to_string(),
+                        payload
+                            .pointer("/history_base/end_ordinal_exclusive")
+                            .and_then(Value::as_u64),
+                        payload
+                            .pointer("/history_base/end_byte_offset")
+                            .and_then(Value::as_u64),
+                    ));
+                }
+            }
             Some("response_item") => handle_response_item(&mut messages, payload, ts),
             Some("event_msg") => handle_event_msg(&mut messages, payload, ts),
             Some("compacted") => messages.push(ChatMessage {
@@ -408,11 +492,29 @@ pub fn transcript(session_id: &str) -> Result<Transcript, String> {
                     name: None,
                 }],
             }),
-            // session_meta / turn_context / 其他行跳过
+            // turn_context / 其他行跳过
             _ => {}
         }
         true
     });
+
+    // 拼接继承的父会话历史（分叉链可多级，限深防环）
+    if let Some((fid, ord, bytes)) = fork_ref {
+        let mut parent = parent_history_messages(&fid, ord, bytes, 5);
+        if !parent.is_empty() {
+            parent.push(ChatMessage {
+                role: "system".to_string(),
+                ts: first_ts.clone(),
+                blocks: vec![Block {
+                    kind: "divider".to_string(),
+                    text: "⑂ 分支点 · 以上为源会话继承的历史".to_string(),
+                    name: None,
+                }],
+            });
+            parent.append(&mut messages);
+            messages = parent;
+        }
+    }
 
     let usage = usage_total.map(|tot| {
         let g = |k: &str| tot.get(k).and_then(Value::as_i64).unwrap_or(0);
