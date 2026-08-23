@@ -2321,13 +2321,14 @@ function renderAssistantMsg(container, blocks, pos) {
     .join('\n');
   const bar = appendMsgActions(bodyEl, txt);
   // 有定位信息（行 ordinal/uuid）→ 支持真·从此消息处分叉
-  if (pos !== undefined && pos !== null) bar.appendChild(makeForkBtn(pos));
+  if (bar && pos !== undefined && pos !== null) bar.appendChild(makeForkBtn(pos));
   return ctx;
 }
 
 /** 助手消息悬浮操作栏：每条消息可复制；⑂ 分支只挂在最后一条回复
  *（CLI 仅支持从会话当前末尾分叉，挂历史消息会误导「从该处分叉」）。 */
 function appendMsgActions(bodyEl, text) {
+  if (!text || !text.trim()) return null; // 无正文的消息不放操作栏（避免悬空按钮）
   const bar = el('div', 'msg-actions');
   const copyBtn = el('button', 'msg-act', '⧉');
   copyBtn.type = 'button';
@@ -2836,7 +2837,7 @@ function finalizeStream() {
   // 流式结束的消息也挂操作栏（复制 + 分支——它就是当前最后一条）
   if (stream && stream.finalText && stream.ctx && !stream.ctx.bodyEl.querySelector('.msg-actions')) {
     const bar = appendMsgActions(stream.ctx.bodyEl, stream.finalText.trim());
-    bar.appendChild(makeForkBtn());
+    if (bar) bar.appendChild(makeForkBtn());
   }
   cursorEl.remove();
   if (stream) {
@@ -4536,8 +4537,6 @@ function bindEvents() {
     });
   });
   $('#feed-primary-btn').addEventListener('click', feedBackToPrimary);
-  // 头部常驻分支按钮（不用滚到最后一条消息）
-  $('#fork-btn').addEventListener('click', doForkNow);
   $('#btn-add-project').addEventListener('click', (e) => {
     e.stopPropagation();
     openProjectPicker(e.currentTarget);
