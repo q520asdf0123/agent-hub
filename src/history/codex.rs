@@ -19,7 +19,9 @@ use crate::types::{Block, ChatMessage, SessionSummary, Transcript};
 const TITLE_SCAN_LINES: usize = 30;
 
 // ---------------------------------------------------------------------------
-// (path, mtime) 增量索引
+// (path, mtime, size) 增量索引
+// （键含 size：Windows 上被子进程继承句柄的 rollout 文件 mtime 可能冻结在
+// 创建时刻——如记忆插件的分离 worker——append-only 文件靠 size 兜底失效）
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
@@ -34,8 +36,9 @@ struct IndexEntry {
     skip: bool,
 }
 
-fn index() -> &'static Mutex<HashMap<PathBuf, (SystemTime, IndexEntry)>> {
-    static INDEX: OnceLock<Mutex<HashMap<PathBuf, (SystemTime, IndexEntry)>>> = OnceLock::new();
+fn index() -> &'static Mutex<HashMap<PathBuf, (SystemTime, u64, IndexEntry)>> {
+    static INDEX: OnceLock<Mutex<HashMap<PathBuf, (SystemTime, u64, IndexEntry)>>> =
+        OnceLock::new();
     INDEX.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -51,7 +54,7 @@ fn is_rollout_file(path: &Path) -> bool {
 }
 
 /// 递归收集 rollout 文件（sessions 树）。
-fn walk(dir: &Path, out: &mut Vec<(PathBuf, SystemTime)>) {
+fn walk(dir: &Path, out: &mut Vec<(PathBuf, SystemTime, u64)>) {
     let Ok(rd) = fs::read_dir(dir) else { return };
     for entry in rd.flatten() {
         let path = entry.path();
@@ -59,28 +62,32 @@ fn walk(dir: &Path, out: &mut Vec<(PathBuf, SystemTime)>) {
         if ft.is_dir() {
             walk(&path, out);
         } else if ft.is_file() && is_rollout_file(&path) {
-            if let Ok(mt) = entry.metadata().and_then(|m| m.modified()) {
-                out.push((path, mt));
+            if let Ok(md) = entry.metadata() {
+                if let Ok(mt) = md.modified() {
+                    out.push((path, mt, md.len()));
+                }
             }
         }
     }
 }
 
-/// 当前存在的全部 rollout 文件：(path, mtime, archived)。
-fn collect_files() -> Vec<(PathBuf, SystemTime, bool)> {
+/// 当前存在的全部 rollout 文件：(path, mtime, size, archived)。
+fn collect_files() -> Vec<(PathBuf, SystemTime, u64, bool)> {
     let mut out = Vec::new();
     let Some(root) = codex_root() else { return out };
     let mut live = Vec::new();
     walk(&root.join("sessions"), &mut live);
-    for (p, mt) in live {
-        out.push((p, mt, false));
+    for (p, mt, sz) in live {
+        out.push((p, mt, sz, false));
     }
     if let Ok(rd) = fs::read_dir(root.join("archived_sessions")) {
         for entry in rd.flatten() {
             let path = entry.path();
             if path.is_file() && is_rollout_file(&path) {
-                if let Ok(mt) = entry.metadata().and_then(|m| m.modified()) {
-                    out.push((path, mt, true));
+                if let Ok(md) = entry.metadata() {
+                    if let Ok(mt) = md.modified() {
+                        out.push((path, mt, md.len(), true));
+                    }
                 }
             }
         }
@@ -277,14 +284,14 @@ pub fn rollout_path_for(session_id: &str) -> Option<PathBuf> {
     }
     collect_files()
         .into_iter()
-        .filter(|(p, _, _)| {
+        .filter(|(p, _, _, _)| {
             p.file_name()
                 .and_then(|n| n.to_str())
                 .map(|n| n.contains(session_id))
                 .unwrap_or(false)
         })
-        .max_by_key(|(_, mt, _)| *mt)
-        .map(|(p, _, _)| p)
+        .max_by_key(|(_, mt, _, _)| *mt)
+        .map(|(p, _, _, _)| p)
 }
 
 /// 文件尾部（64KB）最后一条 token_count 的 info（运行中实时用量旁路用）。
@@ -496,12 +503,16 @@ fn refresh_index() -> Vec<(PathBuf, SystemTime, bool, IndexEntry)> {
     let Ok(mut idx) = index().lock() else {
         return out;
     };
-    for (path, mtime, archived) in files {
+    for (path, mtime, size, archived) in files {
         let entry = match idx.get(&path) {
-            Some((cached_mtime, e)) if *cached_mtime == mtime => e.clone(),
+            Some((cached_mtime, cached_size, e))
+                if *cached_mtime == mtime && *cached_size == size =>
+            {
+                e.clone()
+            }
             _ => {
                 let e = index_file(&path);
-                idx.insert(path.clone(), (mtime, e.clone()));
+                idx.insert(path.clone(), (mtime, size, e.clone()));
                 e
             }
         };

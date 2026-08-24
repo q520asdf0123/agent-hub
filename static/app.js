@@ -2410,13 +2410,14 @@ function renderUserMsg(container, blocks, lastAsst) {
   return lastAsst;
 }
 
-function renderTranscript(container, t) {
-  if (!t.messages || !t.messages.length) {
+function renderTranscript(container, tr) {
+  // 参数不可叫 t：会遮蔽全局翻译函数 t()，空消息分支曾因此抛 "t is not a function"
+  if (!tr.messages || !tr.messages.length) {
     container.appendChild(el('div', 'empty center', t('（此会话没有可显示的消息）')));
     return;
   }
   let lastAsst = null;
-  for (const m of t.messages) {
+  for (const m of tr.messages) {
     if (m.role === 'assistant') {
       const blocks = m.blocks || [];
       // 纯工具消息并入上一条助手消息的分组（跨消息聚合，避免一串「运行了命令」）
