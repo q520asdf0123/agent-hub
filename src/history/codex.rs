@@ -709,11 +709,19 @@ fn injected_user_text(text: &str) -> bool {
 /// 文本消息入列；response_item 与 event_msg 重复表达同一消息时去重
 /// （同 role、文本相同、相邻出现，保留先出现的）。
 fn push_text_dedup(messages: &mut Vec<ChatMessage>, role: &str, ts: Option<String>, text: String) {
-    if let Some(last) = messages.last() {
-        if last.role == role
-            && last.blocks.len() == 1
+    // 回溯时跳过同角色的纯图片消息：带图输入会先落若干 image 消息，只看 last
+    // 会漏判，导致 response_item 与 item_completed 各插一条正文（正文重复两遍）。
+    let prev_text = messages
+        .iter()
+        .rev()
+        .take_while(|m| m.role == role)
+        .find(|m| !(m.blocks.len() == 1 && m.blocks[0].kind == "image"));
+    if let Some(last) = prev_text {
+        // 比对前统一剔除图片标记：同一条消息的两种记录（response_item /
+        // item_completed）只有一方会被剥离，按原文比对会漏判成两条。
+        if last.blocks.len() == 1
             && last.blocks[0].kind == "text"
-            && last.blocks[0].text.trim() == text.trim()
+            && strip_image_refs(&last.blocks[0].text) == strip_image_refs(&text)
         {
             return;
         }
@@ -728,6 +736,19 @@ fn push_text_dedup(messages: &mut Vec<ChatMessage>, role: &str, ts: Option<Strin
             name: None,
         },
     );
+}
+
+/// 剔除「请查看图片文件: <路径>」标记行（发图的文本形式，整行成立）。
+fn strip_image_refs(text: &str) -> String {
+    text.lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !(t.starts_with("请查看图片文件:") || t.starts_with("请查看图片文件："))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
 }
 
 fn handle_response_item(messages: &mut Vec<ChatMessage>, payload: &Value, ts: Option<String>) {
@@ -751,6 +772,14 @@ fn handle_response_item(messages: &mut Vec<ChatMessage>, payload: &Value, ts: Op
                     }
                 }
             }
+            // 「请查看图片文件: <路径>」是本应用发图时写进 prompt 的文本形式，
+            // 前端会把它还原成缩略图。同一条消息又带了 input_image 时，图片块
+            // 已经把图带上了，正文里的标记若保留会让同一张图渲染两次。
+            let text = if images.is_empty() {
+                text
+            } else {
+                strip_image_refs(&text)
+            };
             let injected = role == "user" && injected_user_text(&text);
             if !text.trim().is_empty() && !injected {
                 push_text_dedup(messages, role, ts.clone(), text);
