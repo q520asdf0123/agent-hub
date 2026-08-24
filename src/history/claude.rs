@@ -499,6 +499,8 @@ pub fn transcript(project: &str, session_id: &str) -> Result<Transcript, String>
         None
     };
 
+    attach_subagents(&path, &mut messages);
+
     let title = history_title(session_id)
         .or(fallback_title)
         .filter(|t| !t.is_empty())
@@ -511,6 +513,135 @@ pub fn transcript(project: &str, session_id: &str) -> Result<Transcript, String>
         messages,
         usage,
     })
+}
+
+/// 单个子 agent 转录 → sub_* 块（文本与工具调用；thinking 略去以免嵌套区过长）。
+/// 上限防止超长子任务把响应撑爆——截断后补一条提示块。
+const SUBAGENT_BLOCK_MAX: usize = 120;
+
+fn subagent_blocks(path: &Path) -> Vec<Block> {
+    let mut out: Vec<Block> = Vec::new();
+    let mut truncated = false;
+    for_each_line(path, |line| {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            return true;
+        };
+        if v.get("type").and_then(Value::as_str) != Some("assistant") {
+            return true;
+        }
+        let Some(content) = v.pointer("/message/content").and_then(Value::as_array) else {
+            return true;
+        };
+        for b in content {
+            if out.len() >= SUBAGENT_BLOCK_MAX {
+                truncated = true;
+                return false;
+            }
+            match b.get("type").and_then(Value::as_str).unwrap_or("") {
+                "text" => {
+                    if let Some(t) = b.get("text").and_then(Value::as_str) {
+                        if !t.trim().is_empty() {
+                            out.push(Block {
+                                kind: "sub_text".to_string(),
+                                text: truncate_chars(t, SUMMARY_MAX),
+                                name: None,
+                            });
+                        }
+                    }
+                }
+                "tool_use" => {
+                    let input = b.get("input").map(|i| i.to_string()).unwrap_or_default();
+                    out.push(Block {
+                        kind: "sub_tool".to_string(),
+                        text: truncate_chars(&input, SUMMARY_MAX),
+                        name: b.get("name").and_then(Value::as_str).map(String::from),
+                    });
+                }
+                _ => {}
+            }
+        }
+        true
+    });
+    if truncated {
+        out.push(Block {
+            kind: "sub_text".to_string(),
+            text: "…（子 agent 过程较长，仅展示前段）".to_string(),
+            name: None,
+        });
+    }
+    out
+}
+
+/// 会话的子 agent 转录：<会话文件同名目录>/subagents/**/*.jsonl。
+/// 返回 (工作流 id, 该工作流下各子 agent 的块)；工作流 id 取文件父目录名。
+fn collect_subagents(session_path: &Path) -> Vec<(String, Vec<Block>)> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(rd) = fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.extension().and_then(|x| x.to_str()) == Some("jsonl") {
+                out.push(p);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(&session_path.with_extension("").join("subagents"), &mut files);
+    files.sort();
+    files
+        .into_iter()
+        .filter_map(|p| {
+            let group = p
+                .parent()
+                .and_then(|d| d.file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string();
+            let blocks = subagent_blocks(&p);
+            (!blocks.is_empty()).then_some((group, blocks))
+        })
+        .collect()
+}
+
+/// 把子 agent 过程插到触发它的工具调用之后：先按工作流 id 在 tool_result 里定位，
+/// 再回溯最近的一次 tool_use（前端按紧邻的卡片归组）。定位不到则整组丢弃，
+/// 避免以主助手口吻散落在正文里。
+fn attach_subagents(session_path: &Path, messages: &mut [ChatMessage]) -> usize {
+    let groups = collect_subagents(session_path);
+    if groups.is_empty() {
+        return 0;
+    }
+    // 工作流 id → 主流中最近一次 tool_use 的 (消息下标, 块下标)
+    let mut anchor: HashMap<String, (usize, usize)> = HashMap::new();
+    let mut last_tool: Option<(usize, usize)> = None;
+    for (mi, m) in messages.iter().enumerate() {
+        for (bi, b) in m.blocks.iter().enumerate() {
+            if b.kind == "tool_use" {
+                last_tool = Some((mi, bi));
+            } else if b.kind == "tool_result" {
+                for (g, _) in &groups {
+                    if !anchor.contains_key(g) && b.text.contains(g.as_str()) {
+                        if let Some(pos) = last_tool {
+                            anchor.insert(g.clone(), pos);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // 同一锚点可能对应多个子 agent：按块下标倒序插入，避免下标漂移
+    let mut pending: Vec<(usize, usize, Vec<Block>)> = groups
+        .into_iter()
+        .filter_map(|(g, blocks)| anchor.get(&g).map(|&(mi, bi)| (mi, bi, blocks)))
+        .collect();
+    pending.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
+    let n = pending.len();
+    for (mi, bi, blocks) in pending {
+        let at = bi + 1;
+        messages[mi].blocks.splice(at..at, blocks);
+    }
+    n
 }
 
 /// 中点分叉：复制父会话文件到指定消息 uuid（含）截断，逐行替换 sessionId，

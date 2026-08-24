@@ -568,6 +568,38 @@ button { font-family: inherit; }
   overflow-wrap: break-word;
 }
 .io-label { font-size: 11px; color: var(--faint); margin: 6px 12px 0; }
+/* 子 agent 过程：卡片内二级嵌套，左侧竖线与主流区分 */
+.sub-badge { flex-shrink: 0; font-size: 11px; }
+.sub-run {
+  margin: 4px 10px 10px;
+  border-left: 2px solid var(--border2);
+  padding-left: 10px;
+}
+.sub-run .io-label { margin: 4px 0 2px; }
+.sub-text {
+  font-size: 12.5px;
+  color: var(--fg2);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  margin: 4px 0;
+}
+.sub-tool {
+  display: flex;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.7;
+  min-width: 0;
+}
+.sub-tool-name { color: var(--fg2); flex-shrink: 0; }
+.sub-tool-name::before { content: '⚙ '; color: var(--faint); }
+.sub-tool-arg {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #757575;
+}
 .io-pre {
   margin: 4px 10px 10px;
   background: var(--bg2);

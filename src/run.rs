@@ -679,15 +679,54 @@ fn build_args(req: &ChatReq) -> (Vec<String>, String) {
 
 // ---------- claude stdout 行 → 统一事件 ----------
 
+/// 子代理行 → sub_* 事件（sub=父 tool_use id）。只取成块的文本与工具调用：
+/// 子代理的 delta 与主流共用一条流，若参与 sent_delta 去重会污染主助手输出；
+/// 成块内容足以还原「它做了什么」，思考过程略去以免嵌套区过长。
+fn claude_map_subagent(v: &Value, parent: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    if v.get("type").and_then(Value::as_str) != Some("assistant") {
+        return out;
+    }
+    let Some(content) = v.pointer("/message/content").and_then(Value::as_array) else {
+        return out;
+    };
+    for block in content {
+        match block.get("type").and_then(Value::as_str).unwrap_or("") {
+            "text" => {
+                if let Some(t) = block.get("text").and_then(Value::as_str) {
+                    if !t.trim().is_empty() {
+                        out.push(json!({"t": "sub_text", "sub": parent, "text": t}));
+                    }
+                }
+            }
+            "tool_use" => {
+                let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
+                let input = block
+                    .get("input")
+                    .map(|i| i.to_string())
+                    .unwrap_or_default();
+                out.push(json!({
+                    "t": "sub_tool",
+                    "sub": parent,
+                    "name": name,
+                    "text": truncate_chars(&input, SUMMARY_MAX),
+                }));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// claude `--output-format stream-json` 一行 → 0..n 个统一事件。解析失败/未知 type 忽略。
 fn claude_map_line(line: &str, st: &mut MapState) -> Vec<Value> {
     let Ok(v) = serde_json::from_str::<Value>(line) else {
         return Vec::new();
     };
-    // 子代理（Task 工具）行带非 null 的 parent_tool_use_id：跳过，避免子代理内部输出
-    // 以主助手口吻插入主流；与历史回放侧 isSidechain 过滤语义对齐（history/claude.rs）。
-    if v.get("parent_tool_use_id").and_then(Value::as_str).is_some() {
-        return Vec::new();
+    // 子代理（Task 工具）行带非 null 的 parent_tool_use_id：不进主流（避免以主助手
+    // 口吻插入），改为带父 id 的 sub_* 事件，由前端嵌进对应工具卡片。
+    if let Some(parent) = v.get("parent_tool_use_id").and_then(Value::as_str) {
+        return claude_map_subagent(&v, parent);
     }
     let mut out: Vec<Value> = Vec::new();
     match v.get("type").and_then(Value::as_str).unwrap_or("") {
@@ -744,6 +783,8 @@ fn claude_map_line(line: &str, st: &mut MapState) -> Vec<Value> {
                             out.push(json!({
                                 "t": "tool_use",
                                 "name": name,
+                                // 调用 id：子代理事件按它归入对应卡片
+                                "id": block.get("id").and_then(Value::as_str),
                                 "text": truncate_chars(&input, SUMMARY_MAX),
                             }));
                             // 文件编辑类工具 → file_edit 事件（前端聚合成「已编辑 N 个文件」卡片）
@@ -1409,4 +1450,50 @@ fn ndjson_response(body: Body) -> Response {
         .header("x-accel-buffering", "no")
         .body(body)
         .unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 子代理行（parent_tool_use_id 非 null）：不进主流，转为带父 id 的 sub_* 事件。
+    #[test]
+    fn subagent_line_maps_to_sub_events() {
+        let line = r#"{"type":"assistant","parent_tool_use_id":"toolu_PARENT","message":{"content":[
+            {"type":"text","text":"先看目录"},
+            {"type":"tool_use","name":"Bash","id":"toolu_INNER","input":{"command":"ls"}}]}}"#;
+        let mut st = MapState::default();
+        let evs = claude_map_line(line, &mut st);
+        assert_eq!(evs.len(), 2, "应产出文本与工具两个事件: {evs:?}");
+        assert_eq!(evs[0]["t"], "sub_text");
+        assert_eq!(evs[0]["sub"], "toolu_PARENT");
+        assert_eq!(evs[0]["text"], "先看目录");
+        assert_eq!(evs[1]["t"], "sub_tool");
+        assert_eq!(evs[1]["sub"], "toolu_PARENT");
+        assert_eq!(evs[1]["name"], "Bash");
+        // 主流状态不受子代理影响（否则主助手的整块文本会被误去重）
+        assert!(!st.sent_delta);
+    }
+
+    /// 子代理的 delta 与用量不进主流：只有成块内容被采纳。
+    #[test]
+    fn subagent_delta_ignored() {
+        let line = r#"{"type":"stream_event","parent_tool_use_id":"toolu_PARENT",
+            "event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"x"}}}"#;
+        let mut st = MapState::default();
+        assert!(claude_map_line(line, &mut st).is_empty());
+        assert!(!st.sent_delta);
+    }
+
+    /// 主链 tool_use 带调用 id，供前端把子代理事件归入对应卡片。
+    #[test]
+    fn main_tool_use_carries_id() {
+        let line = r#"{"type":"assistant","parent_tool_use_id":null,"message":{"content":[
+            {"type":"tool_use","name":"Task","id":"toolu_PARENT","input":{"description":"查一下"}}]}}"#;
+        let mut st = MapState::default();
+        let evs = claude_map_line(line, &mut st);
+        let tu = evs.iter().find(|e| e["t"] == "tool_use").expect("应有 tool_use 事件");
+        assert_eq!(tu["id"], "toolu_PARENT");
+        assert_eq!(tu["name"], "Task");
+    }
 }

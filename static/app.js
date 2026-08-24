@@ -54,6 +54,7 @@ const I18N_EN = {
   '复制路径': 'Copy path', '复制文件内容': 'Copy file content', '复制失败：': 'Copy failed: ',
   '打开失败：': 'Open failed: ', '⧉ 复制': '⧉ Copy', '✓ 已复制': '✓ Copied', '▶ 预览': '▶ Preview',
   '✕ 收起预览': '✕ Hide preview', '⧉ 新标签打开': '⧉ Open in new tab', '💭 思考过程': '💭 Thinking',
+  '子 agent 过程': 'Sub-agent activity',
   '📋 任务计划': '📋 Plan', '运行中': 'Running', '已完成': 'Done', '运行出错：': 'Failed: ',
   '未知错误': 'unknown error', '转录加载失败：': 'Failed to load transcript: ', '重试': 'Retry',
   '（此会话没有可显示的消息）': '(no displayable messages in this session)',
@@ -1918,8 +1919,9 @@ function thinkingCard(text, open) {
   return card;
 }
 
-function toolCard(name, inputText) {
+function toolCard(name, inputText, id) {
   const card = el('div', 'card tool');
+  if (id) card.dataset.tuid = id; // 子 agent 事件按调用 id 归入本卡片
   const head = el('div', 'card-head');
   head.appendChild(el('span', 'card-caret', '▸'));
   head.appendChild(el('span', 'tool-icon', '⚙'));
@@ -1936,6 +1938,38 @@ function toolCard(name, inputText) {
   card.appendChild(body);
   head.addEventListener('click', () => card.classList.toggle('open'));
   return card;
+}
+
+/** 子 agent（Task 工具）过程：嵌进父工具卡片，默认随卡片折叠。 */
+function appendSubTo(card, kind, name, text) {
+  const body = card && card.querySelector('.card-body');
+  if (!body) return;
+  let sub = card.querySelector('.sub-run');
+  if (!sub) {
+    sub = el('div', 'sub-run');
+    sub.appendChild(el('div', 'io-label', t('子 agent 过程')));
+    body.appendChild(sub);
+    const head = card.querySelector('.card-head');
+    if (head && !head.querySelector('.sub-badge')) {
+      head.insertBefore(el('span', 'sub-badge', '🤖'), head.querySelector('.tool-summary'));
+    }
+  }
+  if (kind === 'text') {
+    const d = el('div', 'sub-text');
+    d.textContent = text;
+    sub.appendChild(d);
+  } else {
+    const d = el('div', 'sub-tool');
+    d.appendChild(el('span', 'sub-tool-name', name));
+    d.appendChild(el('span', 'sub-tool-arg', oneLine(text)));
+    sub.appendChild(d);
+  }
+}
+
+/** 实时流：按父 tool_use id 找卡片（嵌套子 agent 的父卡片不在视图时静默丢弃）。 */
+function appendSubEvent(parentId, kind, name, text) {
+  if (!parentId) return;
+  appendSubTo(chatMsgs.querySelector('[data-tuid="' + CSS.escape(parentId) + '"]'), kind, name, text);
 }
 
 /* ---------- 工具聚合分组（参考 Codex Desktop：一行小折叠，点开看细节） ---------- */
@@ -1975,7 +2009,7 @@ function endToolGroup(ctx) {
   if (ctx) ctx.lastGroup = null;
 }
 
-function appendToolUse(ctx, name, text) {
+function appendToolUse(ctx, name, text, id) {
   const g = ensureToolGroup(ctx);
   g.count++;
   if (TOOL_EDIT_RE.test(name)) g.edit = true;
@@ -1983,7 +2017,7 @@ function appendToolUse(ctx, name, text) {
   else g.run = true;
   g.label.textContent = groupLabel(g);
   g.ico.textContent = g.edit ? '✎' : g.run ? '⊡' : '☰';
-  const card = toolCard(name, text);
+  const card = toolCard(name, text, id);
   g.body.appendChild(card);
   ctx.lastTool = card;
   return card;
@@ -2279,6 +2313,11 @@ function renderAssistantMsg(container, blocks, pos) {
       bodyEl.appendChild(thinkingCard(b.text, false));
     } else if (b.kind === 'tool_use') {
       appendToolUse(ctx, b.name || '工具', b.text);
+    } else if (b.kind === 'sub_text' || b.kind === 'sub_tool') {
+      // 历史回放：紧随其父 tool_use 块，归入刚建好的那张卡片
+      if (ctx.lastTool) {
+        appendSubTo(ctx.lastTool, b.kind === 'sub_text' ? 'text' : 'tool', b.name || '工具', b.text);
+      }
     } else if (b.kind === 'tool_result') {
       appendToolResult(ctx, b.text);
     } else if (b.kind === 'plan') {
@@ -2932,9 +2971,15 @@ function handleEvent(ev) {
       upsertPlan(stream.ctx, ev.items || []);
       stream.ctx.bodyEl.appendChild(cursorEl);
       break;
+    case 'sub_text':
+      appendSubEvent(ev.sub, 'text', '', ev.text || '');
+      break;
+    case 'sub_tool':
+      appendSubEvent(ev.sub, 'tool', ev.name || '工具', ev.text || '');
+      break;
     case 'tool_use': {
       finalizeCur();
-      appendToolUse(stream.ctx, ev.name || '工具', ev.text || '');
+      appendToolUse(stream.ctx, ev.name || '工具', ev.text || '', ev.id);
       // 实时活动条：滑动展示当前正在执行的动作
       const nm = (ev.name || '').toLowerCase();
       const en = CUR_LANG === 'en';
