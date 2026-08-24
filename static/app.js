@@ -2412,6 +2412,17 @@ function makeForkBtn(pos) {
 }
 
 /** 返回新的 lastAsst（用户真实输入会开启新回合 → null） */
+/** 发图的文本标记；正文展示时剥离，故比对气泡内容前也要剥一次 */
+const IMG_REF_SRC = '请查看图片文件[:：]\\s*([^\\s，。;；\\n]+\\.(?:png|jpe?g|gif|webp|bmp))';
+
+/** 一段 prompt 在气泡里实际显示的正文（剥掉图片标记后） */
+function visibleUserText(s) {
+  return String(s || '')
+    .replace(new RegExp(IMG_REF_SRC, 'gi'), '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function renderUserMsg(container, blocks, lastAsst) {
   const toolResults = blocks.filter((b) => b.kind === 'tool_result');
   const others = blocks.filter((b) => b.kind !== 'tool_result');
@@ -2434,7 +2445,7 @@ function renderUserMsg(container, blocks, lastAsst) {
   let joined = textParts.join('\n').replace(/\s+$/, '');
   imgs.push(...extractInlineImages(joined));
   // 「请查看图片文件: <路径>」（本应用发图的文本形式）→ 还原为缩略图并从正文剥离
-  const IMG_REF_RE = /请查看图片文件[:：]\s*([^\s，。;；\n]+\.(?:png|jpe?g|gif|webp|bmp))/gi;
+  const IMG_REF_RE = new RegExp(IMG_REF_SRC, 'gi');
   let mm;
   while ((mm = IMG_REF_RE.exec(joined))) imgs.push(imageEl(mm[1]));
   joined = joined
@@ -2971,6 +2982,21 @@ function handleEvent(ev) {
       upsertPlan(stream.ctx, ev.items || []);
       stream.ctx.bodyEl.appendChild(cursorEl);
       break;
+    case 'user_echo': {
+      // 重连补显本轮用户消息：转录已含（CLI 已落盘）则跳过，避免重复。
+      // 比对用剥掉图片标记后的正文——气泡里显示的就是这一份。
+      const shown = visibleUserText(ev.text);
+      const bubbles = chatMsgs.querySelectorAll('.msg-user .bubble');
+      const last = bubbles[bubbles.length - 1];
+      if (shown && !(last && last.textContent.trim() === shown)) {
+        renderUserMsg(chatMsgs, [{ kind: 'text', text: ev.text || '' }], null);
+        const asst = stream.ctx && stream.ctx.bodyEl;
+        const bubble = chatMsgs.lastElementChild;
+        if (asst && bubble && bubble !== asst) chatMsgs.insertBefore(bubble, asst);
+        scrollChat();
+      }
+      break;
+    }
     case 'sub_text':
       appendSubEvent(ev.sub, 'text', '', ev.text || '');
       break;

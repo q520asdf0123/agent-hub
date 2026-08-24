@@ -53,7 +53,10 @@ struct MapState {
 pub struct RunState {
     pub agent: String,
     pub project: String,
+    /// 侧栏展示用（截断）
     pub prompt: String,
+    /// 本轮完整 prompt：重连时回显，补上 CLI 尚未落盘的那条用户消息
+    prompt_full: String,
     pub session_id: Mutex<Option<String>>,
     /// 已序列化的 NDJSON 行（不含换行）
     events: Mutex<Vec<String>>,
@@ -132,6 +135,14 @@ pub fn attach(rs: Arc<RunState>, announce: Option<String>, from: usize) -> Respo
     let stream = async_stream::stream! {
         if let Some(id) = announce {
             yield Ok::<Vec<u8>, Infallible>(nl(&json!({"t": "run", "run_id": id})));
+        }
+        // 重连（只跟新事件，历史由转录重载补齐）：先回显本轮 prompt。
+        // CLI 把用户消息写进会话文件需要时间（大会话尤其慢），这段空窗里
+        // 刷新会让刚发出的消息「消失」，且直到切走再切回才补上。
+        if from == usize::MAX && !rs.prompt_full.is_empty() {
+            yield Ok::<Vec<u8>, Infallible>(
+                nl(&json!({"t": "user_echo", "text": rs.prompt_full})),
+            );
         }
         let mut cursor = {
             let ev = rs.events.lock().unwrap();
@@ -250,6 +261,7 @@ pub async fn stream_chat(registry: &RunRegistry, req: ChatReq) -> Response {
         agent: req.agent.clone(),
         project: req.project.clone(),
         prompt: req.prompt.chars().take(80).collect(),
+        prompt_full: req.prompt.clone(),
         session_id: Mutex::new(req.session_id.clone()),
         events: Mutex::new(Vec::new()),
         notify: Notify::new(),
