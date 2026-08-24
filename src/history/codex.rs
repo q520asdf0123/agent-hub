@@ -930,9 +930,13 @@ fn handle_event_msg(messages: &mut Vec<ChatMessage>, payload: &Value, ts: Option
                         .and_then(Value::as_str)
                 })
                 .filter(|s| !s.trim().is_empty());
-            let is_err = t != "task_complete"
+            let is_err = (t != "task_complete"
                 || err_obj.is_some()
-                || payload.get("codex_error_info").is_some();
+                || payload.get("codex_error_info").is_some())
+                // 记忆开关注入的 hooks 信任豁免告警：每次运行必报的纯提示
+                && !msg
+                    .map(|m| m.contains("dangerously-bypass-hook-trust"))
+                    .unwrap_or(false);
             if let (Some(m), true) = (msg, is_err) {
                 messages.push(crate::types::ChatMessage {
                     role: "system".to_string(),

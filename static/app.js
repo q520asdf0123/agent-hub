@@ -602,7 +602,7 @@ const state = {
   sageOn: localStorage.getItem('ah-sage') === '1',            // SAGE 智能路由开关
   sageFailed: null,       // 失败重路由记忆 {task, agents:[]}（成功后清空）
   pendingSage: null,      // 待持久化的路由决策（init 拿到会话 id 即存）
-  memOn: localStorage.getItem('ah-mem') === '1',              // TDAI 记忆代理开关
+  memOn: localStorage.getItem('ah-mem') === '1',              // OpenViking 记忆插件开关
   runsIndex: {},          // session_id → {running, ok, error}（侧栏状态标识）
   modelsInfo: null,       // /api/models 解析结果（默认模型/思考强度展示用）
 };
@@ -1629,10 +1629,10 @@ function syncAgentUI() {
   setToggleChip(sageBtn, t('🧭 智能路由'), state.sageOn);
   // 快速开关（两家都是真实机制，与思考等级相互独立）：
   // claude = --settings fastMode；codex = -c service_tier（TUI /fast 同款配置键）
-  // TDAI 团队记忆：仅 claude 显示（codex 的无界面接入被上游门控阻断，暂不支持）
+  // OpenViking 记忆：claude / codex 均支持（插件 hooks 按次经环境变量开关）
   const memBtn = $('#mem-btn');
   if (memBtn) {
-    memBtn.classList.toggle('hidden', currentAgent() !== 'claude');
+    memBtn.classList.remove('hidden');
     memBtn.classList.toggle('on', state.memOn);
     setToggleChip(memBtn, t('🧠 记忆'), state.memOn);
   }
@@ -4370,7 +4370,7 @@ function bindEvents() {
     syncAgentUI();
   });
 
-  // TDAI 团队记忆开关
+  // OpenViking 记忆开关
   $('#mem-btn').addEventListener('click', () => {
     state.memOn = !state.memOn;
     localStorage.setItem('ah-mem', state.memOn ? '1' : '0');

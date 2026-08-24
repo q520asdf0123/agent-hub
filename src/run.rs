@@ -207,16 +207,16 @@ pub async fn stream_chat(registry: &RunRegistry, req: ChatReq) -> Response {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    // 记忆代理接入在 build_args 内完成：claude 经 --settings env，
-    // codex 经 -c 内联 provider。此处只负责「开了记忆但配置不足」的提示。
-    let mem_note: Option<&str> = if req.memory.unwrap_or(false) {
-        match memory_proxy_conf() {
-            None => Some("记忆代理未配置（~/.agenthub/memory.json），本次直连"),
-            Some(_) if req.agent == "codex" => {
-                Some("记忆暂仅支持 Claude（codex 的无界面接入被上游门控阻断），本次直连")
-            }
-            _ => None,
-        }
+    // 记忆开关显式两态：插件默认「配置文件存在即启用」，未开时必须显式置 0
+    // 才能保证本次不召回不沉淀（claude/codex 的 hooks 子进程继承该变量）。
+    cmd.env(
+        "OPENVIKING_MEMORY_ENABLED",
+        if req.memory.unwrap_or(false) { "1" } else { "0" },
+    );
+    // 记忆（OpenViking 插件）：hooks 读进程环境变量按次开关（下方 env 注入）；
+    // codex 另需 hooks 信任豁免 flag（build_args 的 push_memory_bypass）。
+    let mem_note: Option<&str> = if req.memory.unwrap_or(false) && !openviking_configured() {
+        Some("OpenViking 未配置（~/.openviking/ovcli.conf），本次无记忆")
     } else {
         None
     };
@@ -295,7 +295,9 @@ pub async fn stream_chat(registry: &RunRegistry, req: ChatReq) -> Response {
                         }
                     }
                     Some(Line::Err(l)) => {
-                        if !l.trim().is_empty() {
+                        // hooks 信任豁免告警：开记忆的 codex 每次运行必报一次，
+                        // 纯提示不影响执行——按错误样式展示只会造成误判。
+                        if !l.trim().is_empty() && !l.contains("dangerously-bypass-hook-trust") {
                             pump.push(&json!({"t": "stderr", "text": l}));
                         }
                     }
@@ -435,44 +437,23 @@ const CODEX_INIT_PROMPT: &str = "请分析当前代码库，创建（或更新�
 包含项目概述、构建/测试/运行命令、目录结构、代码风格约定和其他对编码 agent 有用的注意事项。\
 内容要精炼、可执行，基于仓库实际情况，不要编造。";
 
-/// 记忆代理配置（~/.agenthub/memory.json）。
-/// {"proxy":"http://...","key":"sk-mem-...","team":"...","agent":"...","task":"..."}
-/// team/agent/task 可选：配齐后经 headerAutoSelect 静默绑定团队资产
-///（省去交互式选择器；codex 无它则首轮会被门控提示占用，故必需）。
-struct MemConf {
-    proxy: String,
-    key: String,
-    team: Option<String>,
-    agent: Option<String>,
-    task: Option<String>,
+/// OpenViking 是否已配置（与插件「配置文件存在即启用」的判定一致）。
+fn openviking_configured() -> bool {
+    dirs::home_dir()
+        .map(|h| {
+            h.join(".openviking").join("ovcli.conf").exists()
+                || h.join(".openviking").join("ov.conf").exists()
+        })
+        .unwrap_or(false)
 }
 
-fn memory_proxy_conf() -> Option<MemConf> {
-    let p = dirs::home_dir()?.join(".agenthub").join("memory.json");
-    let v: Value = serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()?;
-    let s = |k: &str| {
-        v.get(k)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|x| !x.is_empty())
-            .map(String::from)
-    };
-    let proxy = s("proxy")?.trim_end_matches('/').to_string();
-    let key = s("key")?;
-    Some(MemConf {
-        proxy,
-        key,
-        team: s("team"),
-        agent: s("agent"),
-        task: s("task"),
-    })
+/// codex 记忆：插件 hooks 未经 TUI /hooks 审批会被静默跳过，且插件升级换哈希
+/// 后要重新审批；无界面场景走官方自动化豁免 flag（插件源为官方仓库，已审源）。
+fn push_memory_bypass(args: &mut Vec<String>, req: &ChatReq) {
+    if req.agent == "codex" && req.memory.unwrap_or(false) {
+        args.push("--dangerously-bypass-hook-trust".to_string());
+    }
 }
-
-/// codex 记忆接入：暂禁用。实测上游代理对 codex 的会话初始化有硬性门控——
-/// 无界面（exec）首轮必被「请切 Plan 模式」提示占用，任务不执行；
-/// x-team-id/x-agent-id 头部自动绑定对 codex 路径也不生效（claude 路径正常）。
-/// 待上游支持 headless 或实现预热轮方案后再启用（-c 内联 provider 代码见 git 历史）。
-fn push_memory_provider(_args: &mut [String], _req: &ChatReq) {}
 
 /// codex 图片附件：从 prompt 提取「请查看图片文件: <路径>」约定的本地图片，
 /// 以官方 -i 参数直接附进消息——不依赖模型运行中调用读图工具，
@@ -532,7 +513,7 @@ fn build_args(req: &ChatReq) -> (Vec<String>, String) {
                 args.push(format!("model_reasoning_effort=\"{}\"", e.trim()));
             }
             push_service_tier(&mut args, req);
-            push_memory_provider(&mut args, req);
+            push_memory_bypass(&mut args, req);
             if let Some(m) = req.model.as_deref().filter(|m| !m.trim().is_empty()) {
                 args.push("-c".to_string());
                 args.push(format!("model=\"{}\"", m.trim()));
@@ -597,34 +578,6 @@ fn build_args(req: &ChatReq) -> (Vec<String>, String) {
                 serde_json::Value::String(e.trim().to_string()),
             );
         }
-        // 记忆代理：经 --settings 的 env 按次切换 base_url。
-        // 实测进程环境变量会被全局 settings.json 的 env 覆盖，唯有命令行
-        // --settings 的优先级高于全局文件，故必须走这里。
-        if req.memory.unwrap_or(false) {
-            if let Some(c) = memory_proxy_conf() {
-                let mut env = serde_json::Map::new();
-                env.insert(
-                    "ANTHROPIC_BASE_URL".to_string(),
-                    serde_json::Value::String(format!("{}/claude-code/default", c.proxy)),
-                );
-                env.insert(
-                    "ANTHROPIC_AUTH_TOKEN".to_string(),
-                    serde_json::Value::String(c.key.clone()),
-                );
-                // 团队资产头部自动绑定（配齐 team/agent 后免交互选择器）
-                if let (Some(team), Some(agent)) = (c.team.as_deref(), c.agent.as_deref()) {
-                    let mut h = format!("x-team-id: {team}\nx-agent-id: {agent}");
-                    if let Some(task) = c.task.as_deref() {
-                        h.push_str(&format!("\nx-task-id: {task}"));
-                    }
-                    env.insert(
-                        "ANTHROPIC_CUSTOM_HEADERS".to_string(),
-                        serde_json::Value::String(h),
-                    );
-                }
-                settings.insert("env".to_string(), serde_json::Value::Object(env));
-            }
-        }
         if !settings.is_empty() {
             args.push("--settings".to_string());
             args.push(serde_json::Value::Object(settings).to_string());
@@ -656,7 +609,7 @@ fn build_args(req: &ChatReq) -> (Vec<String>, String) {
                         args.push(format!("model_reasoning_effort=\"{}\"", e.trim()));
                     }
                     push_service_tier(&mut args, req);
-                    push_memory_provider(&mut args, req);
+                    push_memory_bypass(&mut args, req);
                     push_codex_images(&mut args, req);
                     if let Some(m) = req.model.as_deref().filter(|m| !m.trim().is_empty()) {
                         args.push("-m".to_string());
@@ -680,7 +633,7 @@ fn build_args(req: &ChatReq) -> (Vec<String>, String) {
                     args.push(format!("model_reasoning_effort=\"{}\"", e.trim()));
                 }
                 push_service_tier(&mut args, req);
-                push_memory_provider(&mut args, req);
+                push_memory_bypass(&mut args, req);
                 push_codex_images(&mut args, req);
                 if req.permission.as_deref() == Some("bypass") {
                     args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
@@ -696,7 +649,7 @@ fn build_args(req: &ChatReq) -> (Vec<String>, String) {
                     args.push(format!("model_reasoning_effort=\"{}\"", e.trim()));
                 }
                 push_service_tier(&mut args, req);
-                push_memory_provider(&mut args, req);
+                push_memory_bypass(&mut args, req);
                 push_codex_images(&mut args, req);
                 args.push("-C".to_string());
                 args.push(req.project.clone());
@@ -1127,7 +1080,9 @@ fn codex_map_item(item: &Value, st: &mut MapState) -> Vec<Value> {
             // codex 把「配置项不适用、已自动省略」类告警也走 error 事件
             //（如 service_tier=standard 对仅声明 fast 的模型），任务本身
             // 照常执行——这类不算失败。
-            let benign = msg.contains("will be omitted");
+            // 记忆开关注入的 hooks 信任豁免同理：每次运行必报，纯提示。
+            let benign = msg.contains("will be omitted")
+                || msg.contains("dangerously-bypass-hook-trust");
             if st.error.is_none() && !benign {
                 st.error = Some(truncate_chars(msg, SUMMARY_MAX));
             }
