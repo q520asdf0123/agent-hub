@@ -172,13 +172,22 @@ var SageScheduler = (function () {
     };
   }
 
-  function isNestedSageSession(session, runsIndex, backLinks) {
+  /** 只有 COLLABORATE 的搭档算「子会话」（藏进主会话右侧面板）。
+   *  HANDOFF 是所有权移交，目标会话就是接下来的主会话，必须留在侧栏；
+   *  否则智能路由每移交一次，侧栏就少一条记录。 */
+  function isNestedSageSession(session, runsIndex, store) {
     if (!session || !session.id || !session.agent) return false;
     const key = `${session.agent}:${session.id}`;
-    if (backLinks && backLinks[key]) return true;
+    const primaryKey = store && store.back && store.back[key];
+    if (primaryKey) {
+      const entry = ((store.links || {})[primaryKey] || []).find(
+        (item) => item && item.partner === key
+      );
+      if (entry) return entry.kind !== 'handoff';
+    }
     return Object.values(runsIndex || {}).some((run) => {
       const link = collabLinkFromRun(run);
-      return link && link.partnerKey === key;
+      return link && link.partnerKey === key && link.entry.kind !== 'handoff';
     });
   }
 

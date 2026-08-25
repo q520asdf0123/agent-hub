@@ -1521,10 +1521,10 @@ function filterSessions(sessions) {
   for (const link of SageScheduler.collabLinksFromSessions(sessions)) {
     collabLinkSave(link.primaryKey, link.entry, link.partnerKey);
   }
-  const back = collabStoreLoad().back;
+  const store = collabStoreLoad();
   sessions = sessions.filter(
     (s) =>
-      !SageScheduler.isNestedSageSession(s, state.runsIndex, back) &&
+      !SageScheduler.isNestedSageSession(s, state.runsIndex, store) &&
       !/^【协作(分工|复查|追问)】/.test(s.title || '')
   );
   if (!state.agentFilter) return sessions;

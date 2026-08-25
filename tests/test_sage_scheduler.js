@@ -133,18 +133,43 @@ const handoffRun = {
     executor: 'Codex · gpt-5.6-sol',
   },
 };
+// HANDOFF 是所有权移交：目标会话就是接下来的主会话，必须留在侧栏
 assert.equal(
   isNestedSageSession(
     { agent: 'codex', id: 'target' },
     { target: handoffRun },
     {}
   ),
+  false
+);
+// COLLABORATE 的搭档才是子会话（只在主会话右侧面板出现）
+const collabRun = {
+  agent: 'codex', session_id: 'partner', running: true,
+  sage: {
+    kind: 'collaborate', source_agent: 'claude', source_session_id: 'owner',
+    executor: 'Codex · gpt-5.6-terra', requirement: 'coding',
+  },
+};
+assert.equal(
+  isNestedSageSession({ agent: 'codex', id: 'partner' }, { partner: collabRun }, {}),
   true
 );
 assert.equal(
-  isNestedSageSession({ agent: 'codex', id: 'plain' }, { target: handoffRun }, {}),
+  isNestedSageSession({ agent: 'codex', id: 'plain' }, { partner: collabRun }, {}),
   false
 );
+// 已落盘的关联同样按 kind 区分，而不是「只要被指向就算子会话」
+const nestedStore = {
+  links: {
+    'claude:owner': [
+      { partner: 'codex:partner', kind: 'pipeline' },
+      { partner: 'codex:taken-over', kind: 'handoff' },
+    ],
+  },
+  back: { 'codex:partner': 'claude:owner', 'codex:taken-over': 'claude:owner' },
+};
+assert.equal(isNestedSageSession({ agent: 'codex', id: 'partner' }, {}, nestedStore), true);
+assert.equal(isNestedSageSession({ agent: 'codex', id: 'taken-over' }, {}, nestedStore), false);
 const legacySessions = [
   { agent: 'claude', id: 'older', updated: '2026-08-25T02:50:00Z' },
   { agent: 'claude', id: 'source', updated: '2026-08-25T03:03:00Z' },
