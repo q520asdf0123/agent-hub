@@ -19,6 +19,7 @@ const I18N_EN = {
   '会话有任务在运行，先停止再删除': 'A task is running in this session — stop it first',
   '确定删除该会话？文件将移入回收目录（可恢复）': 'Delete this session? The file moves to a recoverable trash folder.',
   '🧠 记忆': '🧠 Memory',
+  '👥 团队': '👥 Team',
   '🤝 协作分工任务书': '🤝 Work-division brief', '🤝 分工产出回注': '🤝 Consolidated partner output',
   '🤝 复查意见回注': '🤝 Review feedback', '🤝 协作复查任务书': '🤝 Review brief',
   '搜索结果': 'Results', '技能': 'Skills', '图片': 'Image', '本地': 'Local', '收起': 'Collapse',
@@ -51,7 +52,8 @@ const I18N_EN = {
   '没有可显示的差异（可能已提交，或与 HEAD 一致）': 'No diff to show (maybe committed, or identical to HEAD)',
   '差异加载失败：': 'Failed to load diff: ', '✕ 关闭': '✕ Close',
   '在 VS Code 中打开': 'Open in VS Code', '在资源管理器中打开': 'Reveal in File Explorer',
-  '复制路径': 'Copy path', '复制文件内容': 'Copy file content', '复制失败：': 'Copy failed: ',
+  '在终端中打开': 'Open in Terminal', '用资源管理器打开': 'Open in File Explorer',
+  '复制路径': 'Copy path', '复制目录路径': 'Copy folder path', '复制文件内容': 'Copy file content', '复制失败：': 'Copy failed: ',
   '打开失败：': 'Open failed: ', '⧉ 复制': '⧉ Copy', '✓ 已复制': '✓ Copied', '▶ 预览': '▶ Preview',
   '✕ 收起预览': '✕ Hide preview', '⧉ 新标签打开': '⧉ Open in new tab', '💭 思考过程': '💭 Thinking',
   '子 agent 过程': 'Sub-agent activity',
@@ -98,6 +100,10 @@ function tBound(label) {
   return CUR_LANG === 'en'
     ? 'Bound to ' + label + ' — start a new session to switch'
     : '会话已绑定 ' + label + '，新建会话可切换';
+}
+
+function tOpenIn(name) {
+  return CUR_LANG === 'en' ? 'Open in ' + name : '在 ' + name + ' 中打开';
 }
 
 /** 静态界面文案随语言刷新 */
@@ -368,6 +374,29 @@ function renderMarkdown(container, raw) {
     i++;
   }
   flushPara();
+  promoteMarkdownLead(container);
+}
+
+/** 把回答开头的首个标题区提升为摘要卡，直到下一标题前为止。
+ *  只依赖 Markdown 结构，不绑定“结论 / Summary”等具体文案。
+ *  收敛条件（缺一不可，否则整篇正文都会被套进强调卡）：
+ *  后面还有同级标题；首段够短；里面没有代码块/表格这类本身带边框的块。 */
+const LEAD_MAX_BLOCKS = 3;
+const LEAD_BLOCKED = ['codeblock', 'md-table', 'md-pre'];
+
+function promoteMarkdownLead(container) {
+  const nodes = [...container.children];
+  const first = nodes[0];
+  if (!first || !first.classList.contains('md-hd')) return;
+  const nextHead = nodes.findIndex((n, i) => i > 0 && n.classList.contains('md-hd'));
+  if (nextHead < 2) return; // 首段为空，或整篇只有一个标题区
+  const section = nodes.slice(0, nextHead);
+  if (section.length > LEAD_MAX_BLOCKS) return;
+  if (section.some((n) => LEAD_BLOCKED.some((cls) => n.classList.contains(cls)))) return;
+
+  const lead = el('section', 'md-lead');
+  container.insertBefore(lead, first);
+  for (const node of section) lead.appendChild(node);
 }
 
 /** 代码块卡片：语言标签头部栏 + 复制按钮 */
@@ -419,45 +448,51 @@ function codeBlock(lang, codeText) {
   return wrap;
 }
 
+/** 行内样式先识别强调范围，再在范围内解析 `code`。
+ *  这样 **模块（`package`）：** 也能完整加粗，不会把星号裸露出来。 */
+function appendInline(node, text) {
+  styleInline(node, text);
+}
+
 /** 行内反引号：`code` → <code>；未闭合的反引号按字面量还原；
  *  普通文本段再做链接化（markdown 链接 / 裸本地路径 / URL）。 */
-function appendInline(node, text) {
+function appendCodeInline(node, text) {
   const parts = text.split('`');
   for (let k = 0; k < parts.length; k++) {
     if (k % 2 === 1) {
       if (k === parts.length - 1) {
-        styleInline(node, '`' + parts[k]);
+        linkify(node, '`' + parts[k]);
       } else {
         const c = el('code', 'md-code');
         c.textContent = parts[k];
         node.appendChild(c);
       }
     } else if (parts[k]) {
-      styleInline(node, parts[k]);
+      linkify(node, parts[k]);
     }
   }
 }
 
-/** 行内样式：**加粗** / __加粗__ / ~~删除线~~（内部继续链接化） */
+/** 行内样式：**加粗** / __加粗__ / ~~删除线~~（内部继续解析代码和链接） */
 function styleInline(node, text) {
-  const re = /(\*\*[^*\n]+\*\*|__[^_\n]+__|~~[^~\n]+~~)/g;
+  const re = /(\*\*[^\n]+?\*\*|__[^\n]+?__|~~[^\n]+?~~)/g;
   let last = 0;
   let m;
   while ((m = re.exec(text))) {
-    if (m.index > last) linkify(node, text.slice(last, m.index));
+    if (m.index > last) appendCodeInline(node, text.slice(last, m.index));
     const tok = m[0];
     if (tok.startsWith('~~')) {
       const s = el('del', 'md-del');
-      linkify(s, tok.slice(2, -2));
+      appendCodeInline(s, tok.slice(2, -2));
       node.appendChild(s);
     } else {
       const b = el('strong', 'md-b');
-      linkify(b, tok.slice(2, -2));
+      appendCodeInline(b, tok.slice(2, -2));
       node.appendChild(b);
     }
     last = m.index + tok.length;
   }
-  if (last < text.length) linkify(node, text.slice(last));
+  if (last < text.length) appendCodeInline(node, text.slice(last));
 }
 
 /** [文本](目标)、裸 Windows 绝对路径、http(s) URL → 可点击链接 */
@@ -580,7 +615,7 @@ const state = {
   permission: 'bypass',   // ChatReq.permission 英文枚举
   model: null,            // null = 默认模型（不传）
   effort: null,           // null = 默认思考等级（不传）
-  fast: false,            // 快速模式（仅 claude 生效）
+  fast: false,            // Claude 手动快速模式；Codex 始终强制 Fast
   project: null,          // Hero 选中的项目路径
   projects: [],           // /api/projects 结果
   session: null,          // {agent, id|null, project, title}；null = Hero 新会话态
@@ -598,15 +633,30 @@ const state = {
   searchSeq: 0,           // 搜索请求竞态序号
   skillsCache: {},        // project 规范化路径 → /api/skills 结果
   modelsPromise: null,    // /api/models 结果缓存
+  editorsPromise: null,   // /api/editors 已安装编辑器列表缓存
   attachments: [],        // 输入框图片附件 [{path, name}]（已存服务端临时目录）
   agentFilter: localStorage.getItem('ah-agent-filter') || '', // ''=全部 | claude | codex
   sageOn: localStorage.getItem('ah-sage') === '1',            // SAGE 智能路由开关
   sageFailed: null,       // 失败重路由记忆 {task, agents:[]}（成功后清空）
   pendingSage: null,      // 待持久化的路由决策（init 拿到会话 id 即存）
   memOn: localStorage.getItem('ah-mem') === '1',              // OpenViking 记忆插件开关
+  teamOn: localStorage.getItem('ah-team') === '1',            // 团队模式（多子 agent 分工）
+  teamSize: Math.min(5, Math.max(2, +localStorage.getItem('ah-team-n') || 3)),
+  runIds: new Set(),        // 当前前台编排涉及的全部 run id（SAGE 并行阶段可有多个）
+  stopping: false,        // 停止请求进行中，防重复点击
+  stopRequested: false,   // 区分“用户停止”与“仅断开查看”
   runsIndex: {},          // session_id → {running, ok, error}（侧栏状态标识）
   modelsInfo: null,       // /api/models 解析结果（默认模型/思考强度展示用）
+  instanceId: null,       // 后端进程实例；变化时自动刷新到新静态资源
+  reloading: false,
 };
+
+// SAGE 已包含 SELF / COLLABORATE / HANDOFF 组队决策，不与手动团队模式叠加。
+// 兼容历史双开状态：启动时优先保留 SAGE，关闭团队模式。
+if (state.sageOn && state.teamOn) {
+  state.teamOn = false;
+  localStorage.setItem('ah-team', '0');
+}
 
 /* ---------- DOM 引用 ---------- */
 
@@ -931,6 +981,48 @@ async function loadStatus() {
   }
 }
 
+async function checkServerInstance() {
+  if (state.reloading) return;
+  try {
+    const info = await api.get('/api/instance');
+    const nextId = info && info.instance_id;
+    if (SageScheduler.shouldReloadInstance(state.instanceId, nextId)) {
+      state.reloading = true;
+      if (state.session) {
+        sessionStorage.setItem('ah-reload-session', JSON.stringify(state.session));
+      }
+      if (promptInput.value) sessionStorage.setItem('ah-reload-draft', promptInput.value);
+      location.reload();
+      return;
+    }
+    if (nextId) {
+      state.instanceId = nextId;
+      document.documentElement.dataset.instanceId = nextId;
+    }
+  } catch (_) {
+    /* 服务切换的短暂不可达不刷新，下一轮继续检查 */
+  }
+}
+
+function restoreReloadState() {
+  let saved = null;
+  try {
+    saved = JSON.parse(sessionStorage.getItem('ah-reload-session') || 'null');
+  } catch (_) { /* 忽略 */ }
+  sessionStorage.removeItem('ah-reload-session');
+  const draft = sessionStorage.getItem('ah-reload-draft');
+  sessionStorage.removeItem('ah-reload-draft');
+  if (draft) {
+    promptInput.value = draft;
+    autoGrow();
+  }
+  if (saved && saved.agent && saved.id && saved.project) {
+    openSession(saved);
+    return true;
+  }
+  return false;
+}
+
 /* ---------- 侧栏：项目 ---------- */
 
 async function loadProjects() {
@@ -952,6 +1044,71 @@ async function loadProjects() {
   }
   // 项目列表就绪后，定位当前打开的会话（刷新自动重开的场景）
   expandProjectFor(state.session);
+}
+
+function getEditors() {
+  if (!state.editorsPromise) {
+    state.editorsPromise = api
+      .get('/api/editors')
+      .then((list) => (Array.isArray(list) ? list : []))
+      .catch(() => []);
+  }
+  return state.editorsPromise;
+}
+
+async function showProjectMenu(e, project) {
+  closeMenu();
+  const menu = el('div', 'menu');
+  menu.addEventListener('click', (ev) => ev.stopPropagation());
+  const loading = el('button', 'menu-item', CUR_LANG === 'en' ? 'Detecting apps…' : '正在检测应用…');
+  loading.type = 'button';
+  loading.disabled = true;
+  menu.appendChild(loading);
+  document.body.appendChild(menu);
+  menuEl = menu;
+  menuOwner = null;
+
+  const position = () => {
+    const mw = menu.offsetWidth;
+    const mh = menu.offsetHeight;
+    menu.style.left = Math.max(8, Math.min(e.clientX, window.innerWidth - mw - 8)) + 'px';
+    menu.style.top = Math.max(8, Math.min(e.clientY, window.innerHeight - mh - 8)) + 'px';
+  };
+  position();
+
+  const editors = await getEditors();
+  if (!menu.isConnected) return;
+  menu.textContent = '';
+
+  const openWith = (app) =>
+    api
+      .post('/api/open', { path: project.path, app })
+      .catch((er) => alert(t('打开失败：') + er.message));
+  const items = editors.map((editor) => ({
+    label: tOpenIn(editor.name),
+    title: editor.path,
+    action: () => openWith(editor.id),
+  }));
+  items.push(
+    { label: t('在终端中打开'), action: () => openWith('terminal') },
+    { label: t('用资源管理器打开'), action: () => openWith('explorer') },
+    {
+      label: t('复制目录路径'),
+      action: () => navigator.clipboard.writeText(project.path).catch(() => {}),
+    }
+  );
+
+  for (const item of items) {
+    const btn = el('button', 'menu-item', item.label);
+    btn.type = 'button';
+    if (item.title) btn.title = item.title;
+    btn.addEventListener('click', () => {
+      closeMenu();
+      item.action();
+    });
+    menu.appendChild(btn);
+  }
+  position();
 }
 
 function renderProjects() {
@@ -990,6 +1147,11 @@ function renderProjects() {
     if (state.expanded.has(p.path)) caret.classList.add('open');
     row.appendChild(caret);
     row.addEventListener('click', () => toggleProject(p.path));
+    row.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      showProjectMenu(e, p);
+    });
     grp.appendChild(row);
     if (state.expanded.has(p.path)) {
       const box = el('div', 'proj-sessions');
@@ -1204,14 +1366,10 @@ function sessionRow(s) {
 /** runs → session_id 索引。同一会话可能有多次运行（旧轮已完成 + 新轮运行中，
  *  注册表顺序随机）：运行中优先，其次取较新的（run_id 含毫秒时间戳）。 */
 function buildRunsIndex(runs) {
-  const idx = {};
-  const ts = (x) => parseInt(((x && x.run_id) || '').split('-')[1] || '0', 10);
-  for (const r of runs) {
-    if (!r.session_id) continue;
-    const prev = idx[r.session_id];
-    if (!prev || (r.running && !prev.running) || (!!r.running === !!prev.running && ts(r) > ts(prev))) {
-      idx[r.session_id] = r;
-    }
+  const idx = SageScheduler.buildRunsIndex(runs);
+  for (const r of runs || []) {
+    const link = SageScheduler.collabLinkFromRun(r);
+    if (link) collabLinkSave(link.primaryKey, link.entry, link.partnerKey);
     if (r.running) seenRunningPartners.add(r.session_id); // 供自动回注判定
   }
   return idx;
@@ -1233,7 +1391,17 @@ async function ensureRunsIndex() {
 /** 会话列表合并运行中任务：新会话文件未落盘/未被索引时（claude 首轮长任务
  *  尤其明显），列表会缺席几分钟——用注册表数据合成占位行，避免误以为没发出去 */
 function mergeRunningSessions(sessions, project) {
-  const have = new Set(sessions.map((s) => s.agent + ':' + s.id));
+  const enriched = sessions.map((session) => {
+    const run = state.runsIndex[session.id];
+    if (
+      run && run.display_prompt &&
+      (!session.title || session.title === '(无标题)' || session.title === t('(无标题)'))
+    ) {
+      return { ...session, title: snippet(run.display_prompt, 40) };
+    }
+    return session;
+  });
+  const have = new Set(enriched.map((s) => s.agent + ':' + s.id));
   const extra = [];
   for (const [sid, r] of Object.entries(state.runsIndex)) {
     if (!r.running || !sid || !r.agent) continue;
@@ -1242,14 +1410,14 @@ function mergeRunningSessions(sessions, project) {
     extra.push({
       agent: r.agent,
       id: sid,
-      title: snippet(r.prompt || '(运行中)', 40),
+      title: snippet(r.display_prompt || r.prompt || '(运行中)', 40),
       project: r.project || '',
       created: null,
       updated: new Date().toISOString(),
       archived: false,
     });
   }
-  return extra.concat(sessions);
+  return extra.concat(enriched);
 }
 
 async function loadConvs() {
@@ -1350,9 +1518,14 @@ function applyGroupCollapse() {
 /** 侧栏 agent 过滤（左侧图标栏） */
 function filterSessions(sessions) {
   // 协作子会话不进侧栏（在主会话右侧面板展示状态与入口）
+  for (const link of SageScheduler.collabLinksFromSessions(sessions)) {
+    collabLinkSave(link.primaryKey, link.entry, link.partnerKey);
+  }
   const back = collabStoreLoad().back;
   sessions = sessions.filter(
-    (s) => !back[s.agent + ':' + s.id] && !/^【协作(分工|复查|追问)】/.test(s.title || '')
+    (s) =>
+      !SageScheduler.isNestedSageSession(s, state.runsIndex, back) &&
+      !/^【协作(分工|复查|追问)】/.test(s.title || '')
   );
   if (!state.agentFilter) return sessions;
   return sessions.filter((s) => s.agent === state.agentFilter);
@@ -1426,10 +1599,13 @@ function applyRunBadge(row, st) {
     const time = row.querySelector('.srow-time');
     row.insertBefore(b, time || null);
   }
-  const cls = st.running ? 'running' : st.ok ? 'ok' : 'err';
+  const stopped = !st.running && st.error === '已停止';
+  const cls = st.running ? 'running' : stopped ? 'stopped' : st.ok ? 'ok' : 'err';
   b.className = 'run-badge ' + cls;
-  b.textContent = st.running ? '●' : st.ok ? '✓' : '✕';
-  b.title = st.running ? t('运行中') : st.ok ? t('已完成') : t('运行出错：') + (st.error || t('未知错误'));
+  b.textContent = st.running ? '●' : stopped ? '■' : st.ok ? '✓' : '✕';
+  b.title = st.running
+    ? t('运行中')
+    : stopped ? t('■ 已停止') : st.ok ? t('已完成') : t('运行出错：') + (st.error || t('未知错误'));
 }
 
 function refreshRunBadges() {
@@ -1550,13 +1726,7 @@ function loadAgentPrefs(agent) {
   state.permission = p.permission || 'bypass';
   state.model = p.model !== undefined ? p.model : null;
   state.effort = p.effort !== undefined ? p.effort : null;
-  if (p.fast === undefined && agent === 'codex') {
-    // 未设置过：跟随 config.toml 的全局 service_tier（TUI /fast 持久化值）
-    const inf = state.modelsInfo && state.modelsInfo.codex;
-    state.fast = !!(inf && inf.service_tier === 'fast');
-  } else {
-    state.fast = !!p.fast;
-  }
+  state.fast = agent === 'codex' ? true : !!p.fast;
 }
 
 function setAgent(agent) {
@@ -1578,6 +1748,12 @@ const EFFORT_LABELS = {
 
 function effortLabel() {
   const pre = CUR_LANG === 'en' ? 'Effort·' : '思考·';
+  if (state.sageOn) {
+    const active = state.session && state.session.effort;
+    return pre + (active
+      ? (CUR_LANG === 'en' ? 'Auto·' : '自动·') + t(EFFORT_LABELS[active] || active)
+      : CUR_LANG === 'en' ? 'Auto' : '自动');
+  }
   if (state.effort !== null) return pre + t(EFFORT_LABELS[state.effort] || state.effort);
   const info = state.modelsInfo && state.modelsInfo[currentAgent()];
   const de = info && info.default_effort;
@@ -1591,6 +1767,11 @@ function canSwitchAgent() {
 
 function currentAgent() {
   return state.session ? state.session.agent : state.agent;
+}
+
+/** Codex 的所有模型固定走 Fast；Claude 继续使用用户开关。 */
+function fastForAgent(agent) {
+  return agent === 'codex' ? true : state.fast;
 }
 
 function syncAgentUI() {
@@ -1609,12 +1790,14 @@ function syncAgentUI() {
     badge.title = tBound(AGENTS[currentAgent()].label);
   }
   $('#perm-btn').textContent = permLabel();
-  $('#effort-btn').textContent = effortLabel();
+  const effortBtn = $('#effort-btn');
+  effortBtn.textContent = effortLabel();
+  effortBtn.title = state.sageOn
+    ? '思考强度由 SAGE 按任务复杂度、需求节点和模型支持范围自动选择'
+    : '思考强度';
   const mb = $('#model-btn');
   mb.textContent = modelLabel();
   mb.title = '模型：' + modelFull();
-  // 快速：claude = fastMode 设置；codex = 低思考等级快捷开关
-  // （实测 codex CLI 0.148 无 speed tier 参数；官方对 low 的描述即 fast responses）
   // SAGE 智能路由：新会话 = 选执行者；绑定的协作会话 = 追问分诊（开关同一个）
   const sageBtn = $('#sage-btn');
   const hasCollab = !!(
@@ -1624,7 +1807,7 @@ function syncAgentUI() {
   );
   sageBtn.classList.toggle('hidden', !canSwitchAgent() && !hasCollab);
   sageBtn.title = canSwitchAgent()
-    ? 'SAGE 智能路由：按任务需求自动在 Claude Code / Codex 间选择执行者'
+    ? 'SAGE 智能路由：按任务复杂度自动选择团队人数、CLI、模型、思考强度与需求分工；与团队模式互斥'
     : 'SAGE 追问分诊：属搭档擅长域的追问自动转子会话执行并回注';
   sageBtn.classList.toggle('on', state.sageOn);
   setToggleChip(sageBtn, t('🧭 智能路由'), state.sageOn);
@@ -1637,14 +1820,25 @@ function syncAgentUI() {
     memBtn.classList.toggle('on', state.memOn);
     setToggleChip(memBtn, t('🧠 记忆'), state.memOn);
   }
+  // 团队模式：两家都支持（claude=Agent+SendMessage，codex=spawn_agent）
+  const teamBtn = $('#team-btn');
+  if (teamBtn) {
+    teamBtn.title = '团队模式：让 agent 派生多个子 agent 分工协作；与智能路由互斥';
+    teamBtn.classList.toggle('on', state.teamOn);
+    setToggleChip(teamBtn, t('👥 团队') + (state.teamOn ? ' ' + state.teamSize : ''), state.teamOn);
+  }
   const fastBtn = $('#fast-btn');
+  const fastForced = currentAgent() === 'codex';
+  const fastOn = fastForAgent(currentAgent());
   fastBtn.classList.remove('hidden');
-  fastBtn.classList.toggle('on', state.fast);
-  setToggleChip(fastBtn, t('⚡ 快速'), state.fast);
+  fastBtn.classList.toggle('on', fastOn);
+  setToggleChip(fastBtn, t('⚡ 快速'), fastOn);
   fastBtn.title =
-    currentAgent() === 'claude'
+    fastForced
+      ? 'Codex 所有模型固定使用 Fast 模式（service_tier=fast），不可关闭'
+      : currentAgent() === 'claude'
       ? '快速模式：以 fastMode 设置运行（需模型支持）'
-      : '快速档：service_tier=fast（TUI /fast 同款，服务端优先处理，消耗更多额度）';
+      : '快速模式';
 }
 
 /** 滑动开关样式的 chip：左侧文案 + 右侧滑轨圆钮 */
@@ -1717,15 +1911,76 @@ function showChat() {
 
 /** 停止后台运行（只有这里会杀 CLI 进程） */
 async function stopRun() {
-  if (state.runId) {
-    try {
-      await api.post('/api/stop', { run_id: state.runId });
-      return; // done 事件随后到达，流自然结束
-    } catch (_) {
-      /* 停止接口失败则退回断开连接 */
+  if (state.stopping) return;
+  state.stopping = true;
+  setSendButton(true);
+  showToast(CUR_LANG === 'en' ? 'Stopping task…' : '正在停止任务…');
+  const localIds = [...state.runIds];
+  if (state.runId) localIds.push(state.runId);
+  const key = state.session && state.session.id
+    ? state.session.agent + ':' + state.session.id
+    : '';
+  const storedDecision = key ? sageStoreLoad()[key] || null : null;
+  const links = key ? collabStoreLoad().links[key] || [] : [];
+  const partnerSessionIds = links.map((link) =>
+    link.partner.slice(link.partner.indexOf(':') + 1)
+  );
+  const workflowIds = [
+    state.pendingSage && state.pendingSage.workflow_id,
+    storedDecision && storedDecision.workflow_id,
+  ].filter(Boolean);
+  let targetIds = [...new Set(localIds)];
+  try {
+    const runs = await api.get('/api/runs');
+    targetIds = SageScheduler.selectStopRunIds(runs, {
+      localIds,
+      sessionId: state.session && state.session.id,
+      partnerSessionIds,
+      workflowIds,
+    });
+    if (!targetIds.length) {
+      showToast(CUR_LANG === 'en' ? 'No running task was found' : '没有找到正在运行的任务');
+      return;
     }
+    state.stopRequested = true;
+    const responses = await Promise.allSettled(
+      targetIds.map((runId) => api.post('/api/stop', { run_id: runId }))
+    );
+    const accepted = responses.filter(
+      (result) => result.status === 'fulfilled' && result.value && result.value.ok
+    ).length;
+    if (state.abort) state.abort.abort();
+    const deadline = Date.now() + 7000;
+    let stillRunning = targetIds;
+    while (Date.now() < deadline && stillRunning.length) {
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      const latest = await api.get('/api/runs');
+      const active = new Set(latest.filter((run) => run.running).map((run) => run.run_id));
+      stillRunning = targetIds.filter((runId) => active.has(runId));
+    }
+    if (stillRunning.length) {
+      showToast(
+        CUR_LANG === 'en'
+          ? `Stop timed out for ${stillRunning.length} task(s)`
+          : `仍有 ${stillRunning.length} 个任务未停止，请重试`
+      );
+    } else {
+      showToast(
+        CUR_LANG === 'en'
+          ? `Stopped ${accepted || targetIds.length} task(s)`
+          : `已停止 ${accepted || targetIds.length} 个任务`
+      );
+    }
+    await pollRuns();
+    loadConvs();
+  } catch (error) {
+    if (state.abort) state.abort.abort();
+    showToast((CUR_LANG === 'en' ? 'Stop failed: ' : '停止失败：') + (error.message || error));
+  } finally {
+    state.stopping = false;
+    if (!state.streaming) state.stopRequested = false;
+    setSendButton(state.streaming);
   }
-  if (state.abort) state.abort.abort();
 }
 
 /** 仅断开查看连接，后台任务继续运行 */
@@ -1736,6 +1991,8 @@ function detachViewer() {
 function onNewSession() {
   if (state.streaming) detachViewer(); // 任务转后台继续，不中断
   showHero();
+  loadAgentPrefs(state.agent); // 自动路由的模型只绑定该会话，新会话恢复手动偏好
+  syncAgentUI();
 }
 
 function setChatHead(sess) {
@@ -1750,6 +2007,7 @@ function setChatHead(sess) {
 
 /** 协作注入消息（分工任务书/复查意见/汇总回注）：正文冗长，渲染为默认收起的卡片 */
 const COLLAB_PREFIXES = [
+  ['【SAGE COLLABORATE', '🤝 协作分工任务书'],
   ['【协作分工】', '🤝 协作分工任务书'],
   ['【协作汇总】', '🤝 分工产出回注'],
   ['【协作复查回注】', '🤝 复查意见回注'],
@@ -1919,14 +2177,47 @@ function thinkingCard(text, open) {
   return card;
 }
 
+/** 团队模式：本应用无法直接调用 agent 的派生工具，只能把组队要求写进 prompt。
+ *  claude 用 Agent + SendMessage（队员间可互通），codex 用 spawn_agent（星型汇总）。 */
+function withTeamPreamble(prompt, agent) {
+  if (!state.teamOn || !prompt.trim()) return prompt;
+  const n = state.teamSize;
+  const head =
+    agent === 'codex'
+      ? `请用 spawn_agent 派生 ${n} 个子 agent 并行完成下面的任务：把任务拆成互相独立的部分分给它们，` +
+        `用 wait 收齐结果后由你汇总。若任务不适合拆分，直接自己做，不要强行派生。`
+      : `请用 Agent 工具启动 ${n} 个 general-purpose 子 agent 组成团队完成下面的任务：给每个队员起名并分配独立的一部分，` +
+        `队员之间需要交换信息时用 SendMessage 互相沟通，最后由你汇总。若任务不适合拆分，直接自己做，不要强行组队。`;
+  return head + '\n\n任务：\n' + prompt;
+}
+
+/** 团队协作类工具的可读摘要：Agent 显示队员名，SendMessage 显示投递对象。
+ *  其余工具沿用参数首行。 */
+function toolHeadInfo(name, inputText) {
+  let inp = null;
+  try {
+    inp = JSON.parse(inputText);
+  } catch (_) { /* 非 JSON 参数：按原样处理 */ }
+  if (inp && typeof inp === 'object') {
+    if (name === 'Agent' && (inp.name || inp.description)) {
+      return { name: 'Agent · ' + (inp.name || inp.subagent_type || ''), summary: oneLine(inp.description || '') };
+    }
+    if (name === 'SendMessage' && (inp.to || inp.recipient)) {
+      return { name: '→ ' + (inp.to || inp.recipient), summary: oneLine(inp.summary || inp.message || '') };
+    }
+  }
+  return { name, summary: oneLine(inputText) };
+}
+
 function toolCard(name, inputText, id) {
   const card = el('div', 'card tool');
   if (id) card.dataset.tuid = id; // 子 agent 事件按调用 id 归入本卡片
   const head = el('div', 'card-head');
   head.appendChild(el('span', 'card-caret', '▸'));
   head.appendChild(el('span', 'tool-icon', '⚙'));
-  head.appendChild(el('span', 'tool-name', name));
-  head.appendChild(el('span', 'tool-summary', oneLine(inputText)));
+  const info = toolHeadInfo(name, inputText);
+  head.appendChild(el('span', 'tool-name', info.name));
+  head.appendChild(el('span', 'tool-summary', info.summary));
   const body = el('div', 'card-body');
   if (inputText) {
     body.appendChild(el('div', 'io-label', '输入'));
@@ -2296,7 +2587,7 @@ function upsertPlan(ctx, items) {
   renderPlanInto(ctx.planCard, items);
 }
 
-function renderAssistantMsg(container, blocks, pos) {
+function renderAssistantMsg(container, blocks, pos, withActions) {
   const bodyEl = el('div', 'msg-asst');
   container.appendChild(bodyEl);
   const ctx = { bodyEl, lastTool: null, lastGroup: null, planCard: null, fileEdits: new Set() };
@@ -2338,7 +2629,9 @@ function renderAssistantMsg(container, blocks, pos) {
     .filter((b) => b.kind === 'text' && b.text)
     .map((b) => b.text)
     .join('\n');
-  const bar = appendMsgActions(bodyEl, txt);
+  // 只有整轮回答的末条才挂操作栏：CLI 会把一次回答拆成许多条消息，
+  // 每条都挂会让每段话下面都多出一行按钮。
+  const bar = withActions ? appendMsgActions(bodyEl, txt) : null;
   // 有定位信息（行 ordinal/uuid）→ 支持真·从此消息处分叉
   if (bar && pos !== undefined && pos !== null) bar.appendChild(makeForkBtn(pos));
   return ctx;
@@ -2417,7 +2710,7 @@ const IMG_REF_SRC = '请查看图片文件[:：]\\s*([^\\s，。;；\\n]+\\.(?:p
 
 /** 一段 prompt 在气泡里实际显示的正文（剥掉图片标记后） */
 function visibleUserText(s) {
-  return String(s || '')
+  return SageScheduler.visibleUserPrompt(s)
     .replace(new RegExp(IMG_REF_SRC, 'gi'), '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
@@ -2460,14 +2753,33 @@ function renderUserMsg(container, blocks, lastAsst) {
   return lastAsst;
 }
 
+/** 每轮回答的末条助手消息下标集合：CLI 把一次回答拆成多条，操作栏只挂末条。
+ *  轮次以「真实用户输入」（含 tool_result 之外的块）为界。 */
+function turnFinalAssistants(msgs) {
+  const out = new Set();
+  let cand = -1;
+  msgs.forEach((m, i) => {
+    const blocks = m.blocks || [];
+    if (m.role === 'assistant' && blocks.some((b) => b.kind === 'text' && b.text)) cand = i;
+    else if (m.role === 'user' && blocks.some((b) => b.kind !== 'tool_result') && cand >= 0) {
+      out.add(cand);
+      cand = -1;
+    }
+  });
+  if (cand >= 0) out.add(cand);
+  return out;
+}
+
 function renderTranscript(container, tr) {
   // 参数不可叫 t：会遮蔽全局翻译函数 t()，空消息分支曾因此抛 "t is not a function"
   if (!tr.messages || !tr.messages.length) {
     container.appendChild(el('div', 'empty center', t('（此会话没有可显示的消息）')));
     return;
   }
+  const finals = turnFinalAssistants(tr.messages);
   let lastAsst = null;
-  for (const m of tr.messages) {
+  for (let mi = 0; mi < tr.messages.length; mi++) {
+    const m = tr.messages[mi];
     if (m.role === 'assistant') {
       const blocks = m.blocks || [];
       // 纯工具消息并入上一条助手消息的分组（跨消息聚合，避免一串「运行了命令」）
@@ -2485,7 +2797,7 @@ function renderTranscript(container, tr) {
       } else {
         // 文件改动跨消息累计，整轮只在末尾出一张汇总卡
         const carry = lastAsst ? lastAsst.fileEdits : null;
-        lastAsst = renderAssistantMsg(container, blocks, m.pos);
+        lastAsst = renderAssistantMsg(container, blocks, m.pos, finals.has(mi));
         if (carry && carry.size) carry.forEach((p) => lastAsst.fileEdits.add(p));
       }
     } else if (m.role === 'user') {
@@ -2515,12 +2827,17 @@ async function attachRun(runId, sess) {
     if (resp.ok && resp.body) await readNdjson(resp, handleEvent);
   } catch (e) {
     aborted = !!(e && e.name === 'AbortError');
+    if (aborted && state.stopRequested && stream) {
+      stream.ctx.bodyEl.appendChild(el('div', 'status-line', t('■ 已停止')));
+    }
   }
   finalizeStream();
   state.streaming = false;
   state.abort = null;
   state.runId = null;
+  state.runIds.clear();
   setSendButton(false);
+  if (state.stopRequested) state.stopRequested = false;
   // 任务结束且仍停留在该会话：重载完整转录（补齐重连前缺失的部分）
   if (!aborted && sess && state.session && state.session.id === sess.id) {
     openSession(state.session);
@@ -2540,31 +2857,63 @@ async function maybeAttachSessionRun(s) {
   }
 }
 
-async function openSession(s) {
-  if (state.streaming) detachViewer(); // 任务转后台继续，不中断
-  state.session = { agent: s.agent, id: s.id, project: s.project, title: s.title || t('(无标题)') };
-  setAgent(s.agent); // 权限/模型下拉选项联动到该会话的 agent
-  expandProjectFor(state.session); // 侧栏展开所属项目并定位
-  setActiveRow(s.agent + ':' + s.id);
-  showChat();
-  setChatHead(state.session);
-  renderCollabPanel(); // 右侧子会话面板（无关联则隐藏）
-  // 子会话：头部常驻「返回主会话 / 回注主会话」（顶部横幅滚下去就看不见了）
-  state.backPrimary = collabStoreLoad().back[s.agent + ':' + s.id] || null;
+function syncBackPrimaryUI(s) {
+  const key = s && s.id ? s.agent + ':' + s.id : '';
+  const store = collabStoreLoad();
+  state.backPrimary = key ? store.back[key] || null : null;
+  const backEntry = state.backPrimary
+    ? (store.links[state.backPrimary] || []).find((entry) => entry.partner === key)
+    : null;
+  const handoffBack = backEntry && backEntry.kind === 'handoff';
   const bb = $('#back-primary-btn');
   const fb = $('#feed-primary-btn');
   if (bb) {
     bb.classList.toggle('hidden', !state.backPrimary);
-    bb.textContent = CUR_LANG === 'en' ? '← Main session' : '← 主会话';
+    bb.textContent = handoffBack
+      ? (CUR_LANG === 'en' ? '← Source session' : '← 来源会话')
+      : (CUR_LANG === 'en' ? '← Main session' : '← 主会话');
   }
   if (fb) {
-    fb.classList.toggle('hidden', !state.backPrimary);
+    fb.classList.toggle('hidden', !state.backPrimary || handoffBack);
     fb.textContent = CUR_LANG === 'en' ? '⇪ Feed back' : '⇪ 回注主会话';
     fb.title =
       CUR_LANG === 'en'
         ? 'Send this sub-session\'s latest conclusion to the main session to act on'
         : '把子会话最新结论交给主会话消化落实（主会话不会自动看见子会话内容）';
   }
+}
+
+async function openSession(s) {
+  if (state.streaming) detachViewer(); // 任务转后台继续，不中断
+  const savedDecision = s.id ? sageStoreLoad()[s.agent + ':' + s.id] || null : null;
+  const savedExecutor = savedDecision ? sageExecutor(savedDecision, savedDecision.primary) : null;
+  const sessionModel =
+    s.model || (savedExecutor && savedExecutor.runtime === s.agent ? savedExecutor.model : null);
+  const sessionEffort = s.effort || savedDecision && savedDecision.primary_effort || null;
+  state.session = {
+    agent: s.agent,
+    id: s.id,
+    project: s.project,
+    title: s.title || t('(无标题)'),
+    model: sessionModel || null,
+    effort: sessionEffort,
+  };
+  setAgent(s.agent); // 权限/模型下拉选项联动到该会话的 agent
+  if (sessionModel) {
+    state.model = sessionModel;
+    syncAgentUI();
+  }
+  if (sessionEffort) {
+    state.effort = sessionEffort;
+    syncAgentUI();
+  }
+  expandProjectFor(state.session); // 侧栏展开所属项目并定位
+  setActiveRow(s.agent + ':' + s.id);
+  showChat();
+  setChatHead(state.session);
+  renderCollabPanel(); // 右侧子会话面板（无关联则隐藏）
+  // 子会话：头部常驻「返回主会话 / 回注主会话」（顶部横幅滚下去就看不见了）
+  syncBackPrimaryUI(state.session);
   const ub = $('#usage-bar');
   if (ub) ub.classList.add('hidden'); // 历史会话无实时用量数据
   promptInput.placeholder = t('继续这个会话…');
@@ -2621,6 +2970,7 @@ function scrollChat() {
 /* ---------- NDJSON 流式对话 ---------- */
 
 let stream = null; // {ctx:{bodyEl,lastTool}, cur, stderrPre}
+let sageUsage = null; // SAGE 协作/移交期间跨子会话的用量聚合（形状对齐 stream）
 const cursorEl = el('span', 'cursor');
 
 function beginAssistant() {
@@ -2721,10 +3071,12 @@ function renderUsageFromHistory(u, agent) {
 
 function renderUsageBar() {
   const bar = $('#usage-bar');
-  if (!bar || !stream) return;
-  const b = stream.base;
-  if (!stream.usage.has && !b) return;
-  const raw = stream.usage;
+  // SAGE 协作/移交期间没有主流式对象，改用跨节点的用量聚合器
+  const s = stream || sageUsage;
+  if (!bar || !s) return;
+  const b = s.base;
+  if (!s.usage.has && !b) return;
+  const raw = s.usage;
   // abs（scope=session 权威值）已含整场累计，直接用；否则基线（历史）+ 本轮增量
   const u = raw.abs
     ? {
@@ -2745,12 +3097,12 @@ function renderUsageBar() {
       };
   // 速度 = 本轮实时速率（Δ输出 / Δ时间），每秒随定时器刷新
   let speed;
-  if (raw.abs && stream.spd0) {
+  if (raw.abs && s.spd0) {
     speed =
-      Math.max(0, raw.output - stream.spd0.out) /
-      Math.max(1, (Date.now() - stream.spd0.t) / 1000);
+      Math.max(0, raw.output - s.spd0.out) /
+      Math.max(1, (Date.now() - s.spd0.t) / 1000);
   } else {
-    speed = raw.output / Math.max(1, (Date.now() - stream.startedAt) / 1000);
+    speed = raw.output / Math.max(1, (Date.now() - s.startedAt) / 1000);
   }
   const den = u.input + u.cr + u.cw;
   const hit = den > 0 ? Math.round((u.cr / den) * 100) : 0;
@@ -2762,7 +3114,7 @@ function renderUsageBar() {
     '\noutput ' + u.output;
   const win0 = u.window || contextWindowFor();
   const winEff =
-    win0 > 0 ? win0 : stream.base && /\[1m\]/i.test(stream.base.model) ? 1000000 : 0;
+    win0 > 0 ? win0 : s.base && /\[1m\]/i.test(s.base.model) ? 1000000 : 0;
   if (winEff > 0 && u.ctx > 0) {
     const used = Math.min(100, Math.round((u.ctx / winEff) * 100));
     text += ' · ' + t('上下文') + ' ' + used + '%';
@@ -2810,34 +3162,54 @@ function toolDetail(raw) {
   return s;
 }
 
-function updateTicker(label, detail) {
-  if (!stream) return;
-  if (!stream.ticker) {
+/** 工具名 → 活动条动词（主路径与 SAGE 节点共用） */
+function tickerLabel(name) {
+  const nm = (name || '').toLowerCase();
+  const en = CUR_LANG === 'en';
+  if (nm.includes('bash') || nm.includes('shell') || nm.includes('command') || nm.includes('exec')) {
+    return en ? 'Running' : '正在运行';
+  }
+  if (nm.includes('read')) return en ? 'Reading' : '正在读取';
+  if (nm.includes('edit') || nm.includes('write') || nm.includes('patch')) {
+    return en ? 'Editing' : '正在编辑';
+  }
+  if (nm.includes('search') || nm.includes('grep') || nm.includes('glob') || nm.includes('find')) {
+    return en ? 'Searching' : '正在搜索';
+  }
+  return (en ? 'Calling ' : '正在调用 ') + (name || (en ? 'tool' : '工具'));
+}
+
+/** st 省略时作用于主流式对象；SAGE 各节点各自传入自己的 ctx 容器，互不抢占。 */
+function updateTicker(label, detail, st) {
+  const s = st || stream;
+  if (!s) return;
+  if (!s.ticker) {
     const box = el('div', 'run-ticker');
     box.appendChild(el('span', 'run-ticker-dot'));
     box.appendChild(el('span', 'run-ticker-text'));
     box.title = t('点击展开 / 收起');
     box.addEventListener('click', () => {
-      if (!stream || !stream.ticker) return;
-      stream.tickerOpen = !stream.tickerOpen;
-      renderTickerContent(false);
+      if (!s.ticker) return;
+      s.tickerOpen = !s.tickerOpen;
+      renderTickerContent(false, s);
     });
-    stream.ticker = box;
+    s.ticker = box;
   }
-  stream.tickerData = { label, detail: detail || '' };
-  renderTickerContent(true);
-  stream.ctx.bodyEl.appendChild(stream.ticker); // 始终挪到当前末尾
+  s.tickerData = { label, detail: detail || '' };
+  renderTickerContent(true, s);
+  s.ctx.bodyEl.appendChild(s.ticker); // 始终挪到当前末尾
 }
 
 /** 按展开状态渲染活动条：收起 = 单行省略；展开 = 完整内容（约 8 行内滚动） */
-function renderTickerContent(animate) {
-  if (!stream || !stream.ticker || !stream.tickerData) return;
-  const d = stream.tickerData;
-  const box = stream.ticker;
-  box.classList.toggle('open', !!stream.tickerOpen);
+function renderTickerContent(animate, st) {
+  const s = st || stream;
+  if (!s || !s.ticker || !s.tickerData) return;
+  const d = s.tickerData;
+  const box = s.ticker;
+  box.classList.toggle('open', !!s.tickerOpen);
   const txt = box.querySelector('.run-ticker-text');
   let pre = box.querySelector('.run-ticker-pre');
-  if (stream.tickerOpen) {
+  if (s.tickerOpen) {
     txt.textContent = d.label;
     if (!pre) {
       pre = el('pre', 'run-ticker-pre');
@@ -2855,10 +3227,11 @@ function renderTickerContent(animate) {
   }
 }
 
-function removeTicker() {
-  if (stream && stream.ticker) {
-    stream.ticker.remove();
-    stream.ticker = null;
+function removeTicker(st) {
+  const s = st || stream;
+  if (s && s.ticker) {
+    s.ticker.remove();
+    s.ticker = null;
   }
 }
 
@@ -2921,6 +3294,21 @@ function appendStderr(line) {
   stream.stderrPre.textContent += (stream.stderrPre.textContent ? '\n' : '') + line;
 }
 
+function stderrCard(title, lines) {
+  const card = el('div', 'card stderr');
+  const head = el('div', 'card-head');
+  head.appendChild(el('span', 'card-caret', '▸'));
+  head.appendChild(el('span', 'card-title', title));
+  const body = el('div', 'card-body');
+  const pre = el('pre', 'io-pre');
+  pre.textContent = lines.join('\n');
+  body.appendChild(pre);
+  card.appendChild(head);
+  card.appendChild(body);
+  head.addEventListener('click', () => card.classList.toggle('open'));
+  return card;
+}
+
 /** 统一事件处理（CONTRACT §3.3 的 9 种事件） */
 function handleEvent(ev) {
   if (!stream || !ev || typeof ev !== 'object') return;
@@ -2928,6 +3316,7 @@ function handleEvent(ev) {
   switch (ev.t) {
     case 'run':
       state.runId = ev.run_id;
+      if (ev.run_id) state.runIds.add(ev.run_id);
       break;
     case 'init':
       // 新会话拿到 id，或 /fork 分叉出了新 id
@@ -2989,7 +3378,7 @@ function handleEvent(ev) {
       const bubbles = chatMsgs.querySelectorAll('.msg-user .bubble');
       const last = bubbles[bubbles.length - 1];
       if (shown && !(last && last.textContent.trim() === shown)) {
-        renderUserMsg(chatMsgs, [{ kind: 'text', text: ev.text || '' }], null);
+        renderUserMsg(chatMsgs, [{ kind: 'text', text: shown }], null);
         const asst = stream.ctx && stream.ctx.bodyEl;
         const bubble = chatMsgs.lastElementChild;
         if (asst && bubble && bubble !== asst) chatMsgs.insertBefore(bubble, asst);
@@ -3007,19 +3396,7 @@ function handleEvent(ev) {
       finalizeCur();
       appendToolUse(stream.ctx, ev.name || '工具', ev.text || '', ev.id);
       // 实时活动条：滑动展示当前正在执行的动作
-      const nm = (ev.name || '').toLowerCase();
-      const en = CUR_LANG === 'en';
-      const label =
-        nm.includes('bash') || nm.includes('shell') || nm.includes('command') || nm.includes('exec')
-          ? en ? 'Running' : '正在运行'
-          : nm.includes('read')
-            ? en ? 'Reading' : '正在读取'
-            : nm.includes('edit') || nm.includes('write') || nm.includes('patch')
-              ? en ? 'Editing' : '正在编辑'
-              : nm.includes('search') || nm.includes('grep') || nm.includes('glob') || nm.includes('find')
-                ? en ? 'Searching' : '正在搜索'
-                : (en ? 'Calling ' : '正在调用 ') + (ev.name || (en ? 'tool' : '工具'));
-      updateTicker(label, toolDetail(ev.text || ''));
+      updateTicker(tickerLabel(ev.name || ''), toolDetail(ev.text || ''));
       stream.ctx.bodyEl.appendChild(cursorEl);
       break;
     }
@@ -3158,7 +3535,8 @@ function hideComposerError() {
 function setSendButton(streaming) {
   const btn = $('#send-btn');
   btn.classList.toggle('stop', streaming);
-  btn.title = streaming ? '停止' : '发送';
+  btn.disabled = state.stopping;
+  btn.title = state.stopping ? '正在停止…' : streaming ? '停止' : '发送';
   $('#send-icon').classList.toggle('hidden', streaming);
   $('#stop-icon').classList.toggle('hidden', !streaming);
 }
@@ -3192,7 +3570,10 @@ function collabLinkSave(primaryKey, entry, partnerKey) {
   const st = collabStoreLoad();
   st.links[primaryKey] = st.links[primaryKey] || [];
   // 幂等：同一子会话只记一条（init 早存 + 结束兜底存会各调一次）
-  if (!st.links[primaryKey].some((e) => e.partner === entry.partner)) {
+  const existing = st.links[primaryKey].find((e) => e.partner === entry.partner);
+  if (existing) {
+    Object.assign(existing, entry);
+  } else {
     st.links[primaryKey].push(entry);
   }
   // 返回入口归属首个主会话（分叉复制关联时不抢走父会话的归属）
@@ -3204,25 +3585,50 @@ function collabLinkSave(primaryKey, entry, partnerKey) {
   localStorage.setItem('ah-collab', JSON.stringify(st));
 }
 
-/** 回溯发现历史协作关联（缝合功能上线前的旧协作没有记录）：
- *  子会话标题以【协作分工/复查】开头，且首条消息含主会话的原任务文本 → 配对。
- *  命中后回写存储，下次直接命中不再扫描。 */
+function collabTaskKey(text) {
+  return String(text || '')
+    .split('请查看图片文件')[0]
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function executorRuntime(label) {
+  const value = String(label || '').trim();
+  if (value.startsWith('Claude Code')) return 'claude';
+  if (value.startsWith('Codex')) return 'codex';
+  return '';
+}
+
+/** 从历史 transcript.sage 的不可见元数据恢复完整协作关系。
+ *  workflow id 优先精确配对；旧记录没有 id 时退化为原始任务 + owner/executor 语义匹配。 */
 async function discoverCollabLinks(s, tr, key) {
   // 分叉会话不做回溯配对：继承内容与父会话相同，会把父会话的子会话错配过来
   const isFork = (tr.messages || []).some((m) =>
     (m.blocks || []).some((b) => b.kind === 'divider' && (b.text || '').includes('分支点'))
   );
   if (isFork) return [];
-  const um = (tr.messages || []).find(
-    (m) =>
-      m.role === 'user' &&
-      (m.blocks || []).some((b) => b.kind === 'text' && b.text && !b.text.startsWith('【'))
+  const mainMetas = (tr.sage || []).filter(
+    (meta) => meta && ['collaborate', 'summary'].includes(meta.kind) && meta.original_task
   );
-  if (!um) return [];
-  const task = (um.blocks.find((b) => b.kind === 'text' && b.text) || {}).text || '';
-  // 主会话首条消息可能带「请查看图片文件: <路径>」后缀，任务书里只有纯文本任务
-  const probe = task.split('请查看图片文件')[0].replace(/\s+/g, ' ').slice(0, 60).trim();
+  const latestMeta = mainMetas[mainMetas.length - 1] || null;
+  const fallbackUser = [...(tr.messages || [])]
+    .reverse()
+    .find((message) =>
+      message.role === 'user' &&
+      (message.blocks || []).some((block) => block.kind === 'text' && block.text)
+    );
+  const fallbackTask = fallbackUser
+    ? ((fallbackUser.blocks || []).find((block) => block.kind === 'text' && block.text) || {}).text
+    : '';
+  const task = latestMeta && latestMeta.original_task || fallbackTask || '';
+  const taskKey = collabTaskKey(task);
+  const probe = taskKey.slice(0, 60);
   if (probe.length < 8) return [];
+  const workflowIds = new Set(
+    mainMetas
+      .filter((meta) => collabTaskKey(meta.original_task) === taskKey && meta.workflow_id)
+      .map((meta) => meta.workflow_id)
+  );
   let sessions;
   try {
     sessions = await api.get(
@@ -3231,37 +3637,81 @@ async function discoverCollabLinks(s, tr, key) {
   } catch (_) {
     return [];
   }
-  // 已归属其他主会话的子会话不再匹配（一个子会话只属于一个主会话）
+  const titleKey = collabTaskKey(task.split(/\r?\n/).find((line) => line.trim()) || task).slice(0, 36);
+  // 先按原始任务标题缩小候选；实际归属由 transcript.sage 元数据决定。
   const back0 = collabStoreLoad().back;
   const cands = sessions
     .filter((x) => {
-      if (x.id === s.id || !/^【协作(分工|复查)】/.test(x.title || '')) return false;
+      if (x.id === s.id) return false;
+      const titleMatch = SageScheduler.shouldInspectCollabCandidate(
+        collabTaskKey(x.title), titleKey, workflowIds.size > 0
+      );
+      const legacyHandoff = SageScheduler.isLegacyHandoffSource(s, x, sessions);
+      if (!titleMatch && !legacyHandoff) return false;
       const owner = back0[x.agent + ':' + x.id];
       return !owner || owner === key;
     })
-    .slice(0, 8);
+    .slice(0, workflowIds.size ? 50 : 20);
   const found = [];
   for (const c of cands) {
     try {
       const qs = new URLSearchParams({ agent: c.agent, id: c.id, project: s.project || '' });
       const sub = await api.get('/api/session?' + qs);
-      const first = (sub.messages || []).find((m) => m.role === 'user');
-      const txt = first ? (first.blocks || []).map((b) => b.text || '').join('\n') : '';
-      if (!txt.replace(/\s+/g, ' ').includes(probe)) continue;
-      const kind = /^【协作分工】/.test(txt.trim()) ? 'pipeline' : 'review';
-      const cm = txt.match(/你负责：([^。\n]+)/);
+      const handoffMetas = (sub.sage || []).filter(
+        (meta) =>
+          meta && meta.kind === 'handoff' &&
+          meta.source_agent === s.agent && meta.source_session_id === s.id
+      );
+      const legacyHandoffMetas = handoffMetas.length
+        ? []
+        : (sub.sage || []).filter(
+            (meta) =>
+              meta && meta.kind === 'handoff' &&
+              !meta.source_session_id && SageScheduler.isLegacyHandoffSource(s, c, sessions)
+          );
+      const matchedHandoff = handoffMetas.length ? handoffMetas : legacyHandoffMetas;
+      if (matchedHandoff.length) {
+        const meta = matchedHandoff[matchedHandoff.length - 1];
+        found.push({
+          partner: c.agent + ':' + c.id,
+          label: meta.executor || (AGENTS[c.agent] ? AGENTS[c.agent].label : c.agent),
+          kind: 'handoff',
+          cats: '',
+          workflow_id: meta.workflow_id || null,
+          model: sub.usage && sub.usage.model || null,
+          ts: Date.parse(c.created || '') || 0,
+        });
+        continue;
+      }
+      let metas = (sub.sage || []).filter(
+        (meta) =>
+          meta && meta.kind === 'collaborate' &&
+          collabTaskKey(meta.original_task).includes(probe) &&
+          executorRuntime(meta.owner) === s.agent &&
+          meta.executor && meta.owner && meta.executor !== meta.owner
+      );
+      if (workflowIds.size) {
+        const exact = metas.filter((meta) => workflowIds.has(meta.workflow_id));
+        if (exact.length) metas = exact;
+        else if (metas.some((meta) => meta.workflow_id)) continue;
+      }
+      if (!metas.length) continue;
+      const cats = [...new Set(metas.map((meta) => meta.requirement).filter(Boolean))];
+      const meta = metas[metas.length - 1];
       found.push({
         partner: c.agent + ':' + c.id,
-        label: AGENTS[c.agent] ? AGENTS[c.agent].label : c.agent,
-        kind,
-        cats: kind === 'pipeline' && cm ? cm[1] : undefined,
+        label: meta.executor || (AGENTS[c.agent] ? AGENTS[c.agent].label : c.agent),
+        kind: 'pipeline',
+        cats: cats.join('、'),
+        workflow_id: meta.workflow_id || null,
+        model: sub.usage && sub.usage.model || null,
         ts: Date.parse(c.created || '') || 0,
       });
     } catch (_) {
       /* 单个候选失败跳过 */
     }
   }
-  found.sort((a, b) => a.ts - b.ts);
+  found.sort((a, b) => a.ts - b.ts || a.partner.localeCompare(b.partner));
   for (const ln of found) {
     collabLinkSave(key, ln, ln.partner); // 回写，下次免扫描
   }
@@ -3316,13 +3766,27 @@ function renderCollabPanel() {
   if (!panel) return;
   const s = state.session;
   const links = s && s.id ? collabStoreLoad().links[s.agent + ':' + s.id] || [] : [];
-  if (!links.length) {
+  const linkedIds = new Set(
+    links.map((link) => link.partner.slice(link.partner.indexOf(':') + 1))
+  );
+  const globalRuns = Object.values(state.runsIndex).filter((run) => run && run.running);
+  const otherRuns = globalRuns.filter(
+    (run) => run.session_id && run.session_id !== (s && s.id) && !linkedIds.has(run.session_id)
+  );
+  if (!links.length && !otherRuns.length) {
     panel.classList.add('hidden');
     return;
   }
   panel.textContent = '';
+  const globalRunning = globalRuns.length;
   panel.appendChild(
-    el('div', 'collab-panel-title', CUR_LANG === 'en' ? '🤝 Sub-sessions' : '🤝 协作子会话')
+    el(
+      'div',
+      'collab-panel-title',
+      CUR_LANG === 'en'
+        ? `🤝 ${links.length} sub-session${links.length === 1 ? '' : 's'} · ${globalRunning} running globally`
+        : `🤝 当前任务 ${links.length} 个子会话 · 全局运行 ${globalRunning}`
+    )
   );
   for (const ln of links) {
     const i = ln.partner.indexOf(':');
@@ -3332,20 +3796,29 @@ function renderCollabPanel() {
     const dot = el('span', 'agent-dot ' + (AGENTS[pAgent] ? AGENTS[pAgent].cls : ''));
     dot.appendChild(agentIcon(pAgent, 13));
     row.appendChild(dot);
-    row.appendChild(
-      el(
-        'span',
-        'collab-panel-name',
-        ln.label + (ln.cats ? '·' + ln.cats : ln.kind === 'review' ? '·' + t('复查') : '')
-      )
-    );
+    const main = el('span', 'collab-panel-main');
+    main.appendChild(el('span', 'collab-panel-name', ln.label));
+    const nodes = ln.cats
+      ? (CUR_LANG === 'en' ? `Nodes: ${ln.cats}` : `节点：${ln.cats}`)
+      : ln.kind === 'handoff'
+        ? (CUR_LANG === 'en' ? 'Full task ownership' : '完整任务接管')
+        : ln.kind === 'review' ? t('复查') : t('协作执行');
+    main.appendChild(el('span', 'collab-panel-nodes', nodes));
+    row.appendChild(main);
+    // 状态只认运行记录本身：没有记录就是「未知」，不能默认报「已完成」。
     const r = state.runsIndex[pId];
     let stTxt;
     let stCls;
-    if (r && r.running) {
+    if (!r) {
+      stTxt = CUR_LANG === 'en' ? '—' : '—';
+      stCls = 'unknown';
+    } else if (r.running) {
       stTxt = CUR_LANG === 'en' ? 'running' : '运行中';
       stCls = 'run';
-    } else if (r && r.ok === false) {
+    } else if (r.error === '已停止') {
+      stTxt = CUR_LANG === 'en' ? 'stopped' : '已停止';
+      stCls = 'stopped';
+    } else if (r.ok === false) {
       stTxt = CUR_LANG === 'en' ? 'error' : '出错';
       stCls = 'err';
     } else {
@@ -3353,11 +3826,59 @@ function renderCollabPanel() {
       stCls = 'ok';
     }
     row.appendChild(el('span', 'collab-panel-st ' + stCls, stTxt));
-    row.title = CUR_LANG === 'en' ? 'Open sub-session' : '点击打开子会话';
+    row.title = stCls === 'err'
+      ? (r.error || (CUR_LANG === 'en' ? 'Sub-session failed' : '子会话执行失败'))
+      : stCls === 'unknown'
+        ? (CUR_LANG === 'en'
+            ? 'No run record for this sub-session — click to open'
+            : '本次未取到该子会话的运行记录，点击打开查看')
+        : CUR_LANG === 'en' ? 'Open sub-session' : '点击打开子会话';
     row.addEventListener('click', () =>
-      openSession({ agent: pAgent, id: pId, project: s.project, title: '' })
+      openSession({
+        agent: pAgent, id: pId, project: s.project, title: '',
+        model: ln.model || null, effort: ln.effort || null,
+      })
     );
     panel.appendChild(row);
+  }
+  if (otherRuns.length) {
+    panel.appendChild(
+      el(
+        'div',
+        'collab-panel-section',
+        CUR_LANG === 'en' ? `Other tasks running · ${otherRuns.length}` : `其他任务运行中 · ${otherRuns.length}`
+      )
+    );
+    for (const run of otherRuns) {
+      const row = el('div', 'collab-panel-row collab-panel-global');
+      const agent = run.agent || 'codex';
+      const dot = el('span', 'agent-dot ' + (AGENTS[agent] ? AGENTS[agent].cls : ''));
+      dot.appendChild(agentIcon(agent, 13));
+      row.appendChild(dot);
+      const main = el('span', 'collab-panel-main');
+      main.appendChild(
+        el('span', 'collab-panel-name', run.sage && run.sage.executor || AGENTS[agent]?.label || agent)
+      );
+      main.appendChild(
+        el(
+          'span',
+          'collab-panel-nodes',
+          run.sage && run.sage.requirement
+            ? (CUR_LANG === 'en' ? `Node: ${run.sage.requirement}` : `节点：${run.sage.requirement}`)
+            : snippet(run.prompt || (CUR_LANG === 'en' ? 'Running task' : '运行中任务'), 34)
+        )
+      );
+      row.appendChild(main);
+      row.appendChild(el('span', 'collab-panel-st run', CUR_LANG === 'en' ? 'running' : '运行中'));
+      row.title = CUR_LANG === 'en' ? 'Open running session' : '点击打开运行中的会话';
+      row.addEventListener('click', () =>
+        openSession({
+          agent, id: run.session_id, project: run.project || (s && s.project) || '',
+          title: run.prompt || '', model: null, effort: null,
+        })
+      );
+      panel.appendChild(row);
+    }
   }
   panel.classList.remove('hidden');
 }
@@ -3396,10 +3917,16 @@ async function stitchCollab(s, tr) {
   chatMsgs.querySelectorAll('.collab-stitch, .divider.collab-jump').forEach((n) => n.remove());
   const primaryKey = st.back[key];
   if (primaryKey) {
+    const backEntry = (st.links[primaryKey] || []).find((entry) => entry.partner === key);
+    const handoffBack = backEntry && backEntry.kind === 'handoff';
     const d = renderDivider(
-      CUR_LANG === 'en'
-        ? '🤝 Collab sub-session · click to open the main session'
-        : '🤝 协作子会话 · 点击打开主会话'
+      handoffBack
+        ? (CUR_LANG === 'en'
+            ? '🧭 SAGE handoff session · click to open the source session'
+            : '🧭 SAGE 移交会话 · 点击打开来源会话')
+        : (CUR_LANG === 'en'
+            ? '🤝 Collab sub-session · click to open the main session'
+            : '🤝 协作子会话 · 点击打开主会话')
     );
     d.classList.add('collab-jump');
     d.addEventListener('click', () => {
@@ -3414,9 +3941,10 @@ async function stitchCollab(s, tr) {
     chatMsgs.insertBefore(d, chatMsgs.firstChild);
   }
   let links = st.links[key] ? [...st.links[key]] : [];
-  if (!links.length && tr) {
-    links = await discoverCollabLinks(s, tr, key); // 旧协作回溯配对
+  if (tr) {
+    await discoverCollabLinks(s, tr, key); // 每次补扫 metadata，修复缺失/新增 partner
     if (!state.session || state.session.id !== s.id || state.session.agent !== s.agent) return;
+    links = [...(collabStoreLoad().links[key] || [])];
   }
   renderCollabPanel(); // 回溯配对可能新增关联 → 刷新右侧面板
   if (!links.length) return;
@@ -3437,6 +3965,8 @@ async function stitchCollab(s, tr) {
         ln.kind === 'pipeline'
           ? (CUR_LANG === 'en' ? '🤝 Division of work · ' : '🤝 分工执行 · ') +
             ln.label + (ln.cats ? '（' + ln.cats + '）' : '')
+          : ln.kind === 'handoff'
+            ? (CUR_LANG === 'en' ? '🧭 SAGE handoff · ' : '🧭 SAGE 移交 · ') + ln.label
           : (CUR_LANG === 'en' ? '🤝 Collaborative review · ' : '🤝 协作复查 · ') + ln.label;
       // 默认收起：只展示入口分隔线（子会话内容不内联铺开），点击直达子会话
       const secDiv = renderDivider(
@@ -3446,7 +3976,10 @@ async function stitchCollab(s, tr) {
       const pk = ln.partner;
       secDiv.addEventListener('click', () => {
         const j = pk.indexOf(':');
-        openSession({ agent: pk.slice(0, j), id: pk.slice(j + 1), project: s.project, title: '' });
+        openSession({
+          agent: pk.slice(0, j), id: pk.slice(j + 1), project: s.project,
+          title: '', model: ln.model || null, effort: ln.effort || null,
+        });
       });
       sec.appendChild(secDiv);
       // 插到对应的回注卡之前（时间序一一对应；找不到则追加到末尾）
@@ -3458,6 +3991,16 @@ async function stitchCollab(s, tr) {
         chatMsgs.insertBefore(sec, anchor);
       } else {
         chatMsgs.appendChild(sec);
+        if (ln.kind === 'handoff') {
+          scrollChat();
+          continue;
+        }
+        // 官方 SAGE DAG（带 workflow_id）的收尾由所有者的 __summary__ 节点完成，
+        // 再走一遍旧版回注等于让主 agent 白跑一轮，只保留子会话入口。
+        if (ln.workflow_id) {
+          scrollChat();
+          continue;
+        }
         // 无回注锚点且子会话已结束 → 回注收尾。本页刚观察到它「运行中→完成」
         // 且未回注过 = 活跃流水线的延续 → 自动回注；否则（陈年旧会话）留手动按钮。
         const pr = state.runsIndex[pId];
@@ -3534,6 +4077,82 @@ function sageStoreSave(key, d) {
   localStorage.setItem('ah-sage-decisions', JSON.stringify(all));
 }
 
+/** 官方 Task/ExecutionState 输入：未配置真实 SLA 时不伪造 budget/deadline。 */
+function sageRouteContext(session, failed) {
+  const previous =
+    session && session.id ? sageStoreLoad()[session.agent + ':' + session.id] || null : null;
+  const runtime = session ? session.agent : state.agent;
+  const modelInfo = state.modelsInfo && state.modelsInfo[runtime];
+  const incumbentModel = session && session.model || state.model || modelInfo && modelInfo.default || null;
+  return {
+    failed: failed || [],
+    state: previous
+      ? {
+          active_agents: previous.agents || [session.agent],
+          active_mode: previous.mode || 'self',
+          completed_requirements: [], // 追问是新 Task，不沿用上一 Task 的完成节点
+          progress: 0,
+          transferable_context: 1,
+          failed_agents: failed || [],
+          failure_count: (failed || []).length,
+        }
+      : {
+          active_agents: [],
+          active_mode: 'self',
+          completed_requirements: [],
+          progress: 0,
+          transferable_context: 1,
+          failed_agents: failed || [],
+          failure_count: (failed || []).length,
+        },
+    constraints: {
+      permission_mode: state.permission,
+      incumbent_model: incumbentModel,
+      max_team_size: 5,
+    },
+  };
+}
+
+function sageRoutePayload(prompt, agent, failed, session) {
+  const context = sageRouteContext(session, failed);
+  return {
+    prompt,
+    agent,
+    failed: context.failed,
+    state: context.state,
+    constraints: context.constraints,
+  };
+}
+
+function sageExecutor(decision, executorId) {
+  const configured = decision && decision.executors && decision.executors[executorId];
+  if (configured) return { id: executorId, ...configured };
+  const runtime = String(executorId || '').split('::')[0];
+  return {
+    id: executorId,
+    runtime,
+    model: null,
+    label: AGENTS[runtime]?.label || executorId,
+    role: 'Generalist',
+  };
+}
+
+function sageExecutorLabel(decision, executorId) {
+  const executor = sageExecutor(decision, executorId);
+  return executor.label + (executor.role ? ` · ${executor.role}` : '') +
+    (executor.effort ? ` · ${executor.effort}` : '') +
+    (executor.fast ? ' · Fast' : '');
+}
+
+function applySagePrimary(decision) {
+  const executor = sageExecutor(decision, decision.primary);
+  if (executor.runtime && executor.runtime !== state.agent) setAgent(executor.runtime);
+  if (executor.model) state.model = executor.model;
+  if (decision.primary_effort) state.effort = decision.primary_effort;
+  syncAgentUI();
+  return executor;
+}
+
 /** SAGE 决策卡片（折叠，标题展示模式与执行者） */
 function sageCard(d) {
   const MODE_CN = { self: '继续当前', handoff: '移交', collaborate: '协作' };
@@ -3541,7 +4160,7 @@ function sageCard(d) {
   const card = el('div', 'card sage' + (d.mode === 'self' ? '' : ' open'));
   const head = el('div', 'card-head');
   head.appendChild(el('span', 'card-caret', '▸'));
-  const who = AGENTS[d.primary] ? AGENTS[d.primary].label : d.primary;
+  const who = sageExecutorLabel(d, d.primary);
   head.appendChild(
     el('span', 'card-title', t('🧭 SAGE 路由') + ' · ' + t(MODE_CN[d.mode] || d.mode) + ' → ' + who)
   );
@@ -3564,8 +4183,8 @@ function sageCard(d) {
   if (d.mode === 'handoff') {
     lines.push(
       en
-        ? `Verdict: ${who} is the specialist for this — handing over for solo execution (new session, nothing to lose in the switch).`
-        : `判定：这类任务 ${who} 更擅长，移交给它单独执行（新会话切换没有损失）。`
+        ? `Verdict: ${who} is the specialist for this — its advantage exceeds the modeled context-transfer and switching loss.`
+        : `判定：这类任务 ${who} 更擅长，其优势超过模型估算的上下文转移与切换损失，移交后由它接管。`
     );
   } else if (d.mode === 'self') {
     lines.push(
@@ -3574,22 +4193,33 @@ function sageCard(d) {
         : `判定：当前的 ${who} 就是最合适的执行者，无需移交或组队。`
     );
   }
-  if (d.partner) {
-    const p = AGENTS[d.partner] ? AGENTS[d.partner].label : d.partner;
-    const cats = Object.entries(d.assignments || {})
-      .filter(([, a]) => a === d.partner)
-      .map(([r]) => reqName(r));
-    const w = Object.entries(d.assignments || {})
-      .filter(([, a]) => a === d.partner)
-      .reduce((s, [r]) => s + ((d.requirements || {})[r] || 0), 0);
+  const decisionPartners = d.partners || (d.partner ? [d.partner] : []);
+  if (decisionPartners.length) {
+    const peers = decisionPartners.map((partner) => sageExecutorLabel(d, partner)).join('、');
     lines.push(
-      w >= 0.25
-        ? en
-          ? `Verdict: this needs both specialties — ${who} does its part first, then partner ${p} takes over ${cats.join(' & ')}, and the results are consolidated back.`
-          : `判定：任务需要两种专长——${who} 先做自己负责的部分，然后搭档 ${p} 接力完成${cats.join('、')}，最后结论回注汇总。`
-        : en
-          ? `After finishing, ${p} will review the result read-only and feed findings back.`
-          : `完成后会由 ${p} 只读复查一遍，意见回注收尾。`
+      en
+        ? `Verdict: use an auto-sized team — owner ${who} keeps ownership; ${peers} execute their assigned requirement-DAG nodes.`
+        : `判定：使用自动规模团队——所有者 ${who} 保留所有权；${peers} 按需求 DAG 执行各自分配节点。`
+    );
+  }
+  const assignmentEntries = Object.entries(d.assignments || {});
+  if (assignmentEntries.length) {
+    lines.push(
+      (en ? 'Assignments: ' : '需求分工：') +
+        assignmentEntries
+          .map(([requirement, agent]) =>
+            reqName(requirement) + ' → ' + sageExecutorLabel(d, agent) +
+            (d.efforts && d.efforts[requirement] ? ` · 本节点 ${d.efforts[requirement]}` : '')
+          )
+          .join('；')
+    );
+  }
+  if ((d.topology || []).length) {
+    lines.push(
+      (en ? 'Topology: ' : '通信拓扑：') +
+        d.topology
+          .map(([from, to]) => sageExecutorLabel(d, from) + ' → ' + sageExecutorLabel(d, to))
+          .join('；')
     );
   }
   // 打分（口语化）
@@ -3598,6 +4228,21 @@ function sageCard(d) {
     en
       ? `Estimated success ${pct(d.success_probability)}, capability coverage ${pct(d.coverage)} — the highest-utility option among solo / handoff / team.`
       : `预计成功率 ${pct(d.success_probability)}，能力覆盖 ${pct(d.coverage)}——在「自己干 / 移交 / 组队」三个方案里综合得分最高。`
+  );
+  lines.push(
+    (en ? 'Estimated: ' : '估算：') +
+      `cost ${Number(d.cost || 0).toFixed(3)} · latency ${Math.round(d.latency_ms || 0)}ms · ` +
+      `risk ${Number(d.risk || 0).toFixed(3)} · utility ${Number(d.utility || 0).toFixed(3)}`
+  );
+  lines.push(
+    en
+      ? `Auto team: ${d.team_size || (d.agents || []).length} / ${d.team_limit || '-'} · complexity ${d.complexity?.label || 'unknown'}`
+      : `自动团队：${d.team_size || (d.agents || []).length} / 上限 ${d.team_limit || '-'} · 复杂度 ${{ simple: '简单', moderate: '中等', complex: '复杂', very_complex: '很复杂' }[d.complexity?.label] || '未知'} · 汇总 ${d.summary_effort || '默认'}`
+  );
+  lines.push(
+    en
+      ? 'Schedule: requirements assigned to the same executor run serially; independent requirements assigned to different executors run in parallel.'
+      : '调度规则：同一 executor 的需求串行执行；不同 executor 的无依赖需求并行执行。'
   );
   const pre = el('pre', 'io-pre');
   pre.textContent = lines.join('\n');
@@ -3609,304 +4254,624 @@ function sageCard(d) {
   return card;
 }
 
-/** 真协作（子代理模式）：主执行完成 → 搭档只读复查 → 结论回注主会话收尾 */
-async function runCollabReview(collab, primaryText) {
-  if (!state.session || !primaryText.trim()) return;
-  // 记住主会话（回注目标）；复查期间用户可能切走，回注前再校验
-  const primarySess = {
-    agent: state.session.agent,
-    id: state.session.id,
-    project: state.session.project,
-  };
-  const partnerLabel = AGENTS[collab.partner].label;
-  const primaryLabel = AGENTS[state.session.agent]
-    ? AGENTS[state.session.agent].label
-    : state.session.agent;
+function permissionForAgent(agent) {
+  const supported = new Set((AGENTS[agent] && AGENTS[agent].permissions || []).map((p) => p.value));
+  if (supported.has(state.permission)) return state.permission;
+  if (state.permission === 'read-only') return supported.has('plan') ? 'plan' : 'default';
+  if (state.permission === 'plan') return supported.has('read-only') ? 'read-only' : 'default';
+  return supported.has('default') ? 'default' : [...supported][0];
+}
+
+function sageRequirementPrompt(
+  decision, requirement, originalTask, dependencyOutputs, workflowId, primaryRef
+) {
+  const owner = decision.primary;
+  const agent = decision.assignments[requirement];
+  const assignments = Object.entries(decision.assignments || {})
+    .map(([name, assignee]) => `${name} → ${sageExecutorLabel(decision, assignee)}`)
+    .join('；');
+  const topology = (decision.topology || [])
+    .map(([from, to]) => `${sageExecutorLabel(decision, from)} → ${sageExecutorLabel(decision, to)}`)
+    .join('；');
+  const dependencies = (decision.dependencies && decision.dependencies[requirement]) || [];
+  const prior = dependencyOutputs.length
+    ? '\n\n依赖节点产出：\n' + dependencyOutputs.join('\n\n')
+    : '';
+  return (
+    `【SAGE COLLABORATE · ${requirement}】\n` +
+    `协作标识：${workflowId}\n` +
+    (primaryRef ? `主会话：${primaryRef}\n` : '') +
+    `任务所有者：${sageExecutorLabel(decision, owner)}\n` +
+    `当前执行者：${sageExecutorLabel(decision, agent)}\n` +
+    `你只负责需求节点：${requirement}。不要代做其他 Agent 名下的需求。\n` +
+    `本节点思考强度：${decision.efforts && decision.efforts[requirement] || '默认'}\n` +
+    `完整分工：${assignments || '无'}\n` +
+    `通信拓扑：${topology || '无跨 Agent 边'}\n` +
+    `本节点依赖：${dependencies.join('、') || '无'}\n\n` +
+    `原始任务：\n${originalTask}` + prior +
+    '\n\n请完成本节点并给出可供下游节点直接使用的明确产出。'
+  );
+}
+
+function sageSummaryPrompt(decision, originalTask, results, workflowId, primaryRef) {
+  const outputs = Object.entries(results)
+    .map(([name, result]) => {
+      const agent = decision.assignments[name];
+      const who = sageExecutorLabel(decision, agent);
+      const text = result.finalText ? result.finalText.slice(-6000) : result.error || '无产出';
+      return `【${name} · ${who} · ${result.ok ? '成功' : '失败'}】\n${text}`;
+    })
+    .join('\n\n');
+  return (
+    '【SAGE COLLABORATE · 所有者汇总】\n' +
+    `协作标识：${workflowId}\n` +
+    (primaryRef ? `主会话：${primaryRef}\n` : '') +
+    `任务所有者：${sageExecutorLabel(decision, decision.primary)}\n` +
+    `当前执行者：${sageExecutorLabel(decision, decision.primary)}\n` +
+    '你是任务所有者。' +
+    '请依据官方 assignments/DAG 的各节点产出，核对一致性、解决冲突并给出最终结果。\n\n' +
+    `原始任务：\n${originalTask}\n\n节点产出：\n${outputs || '无可用节点产出'}`
+  );
+}
+
+/** 独立 SAGE 节点流：每个并行阶段拥有自己的 DOM、事件状态和会话 id。 */
+/** 被依赖阻塞或 DAG 成环而没跑的节点也要在正文留痕，
+ *  否则它只在汇总里以「失败」出现，用户在页面上完全找不到对应节点。 */
+function appendSageSkipped(decision, requirement, reason) {
+  const agent = (decision.assignments || {})[requirement];
+  const who = agent ? ' · ' + sageExecutorLabel(decision, agent) : '';
   chatMsgs.appendChild(
     renderDivider(
-      (CUR_LANG === 'en' ? '🤝 Collaborative review · ' : '🤝 协作复查 · ') + partnerLabel
+      `⏭ SAGE ${CUR_LANG === 'en' ? 'node' : '节点'} · ${requirement}${who} · ` +
+        (CUR_LANG === 'en' ? 'skipped' : '未执行')
     )
   );
-  scrollChat();
-  const savedHist = state.histUsage;
-  state.histUsage = null; // 复查是独立新会话，不继承用量基线
-  beginAssistant();
-  state.histUsage = savedHist;
-  const reviewPrompt =
-    '【协作复查】另一位 agent（' + primaryLabel + '）刚完成了以下任务，请你只读复查其结论：' +
-    '指出可能的错误、遗漏与风险，并给出简明改进建议。不要修改任何文件或数据。\n\n' +
-    '原任务：\n' + collab.task + '\n\n' + primaryLabel + ' 的输出：\n' + primaryText;
-  const req = {
-    agent: collab.partner,
-    project: state.session.project,
-    prompt: reviewPrompt,
-    session_id: null,
-    model: null,
-    permission: collab.partner === 'codex' ? 'read-only' : 'default',
-    effort: null,
-    fast: false,
-    memory: state.memOn,
+  chatMsgs.appendChild(el('div', 'status-line', '⏭ ' + reason));
+}
+
+/* ---------- SAGE 跨子会话用量聚合（顶部用量条在协作期间照常走字） ---------- */
+
+/** 每个节点各自记账（codex 会发整场绝对值，claude 发增量），总量 = 各节点求和。
+ *  上下文占比只取所有者节点——跨会话的 context 相加没有意义。 */
+function beginSageUsage() {
+  sageUsage = {
+    parts: new Map(),
+    usage: { input: 0, output: 0, cr: 0, cw: 0, ctx: 0, window: 0, has: false, abs: false },
+    base: null,
+    spd0: null,
+    startedAt: Date.now(),
+    timer: setInterval(renderUsageBar, 1000),
   };
+}
+
+function endSageUsage() {
+  if (!sageUsage) return;
+  clearInterval(sageUsage.timer);
+  renderUsageBar(); // 定格最终数值
+  sageUsage = null;
+}
+
+const SAGE_USAGE_FIELDS = [['input', 'input'], ['output', 'output'],
+  ['cr', 'cache_read'], ['cw', 'cache_write']];
+
+function sageUsageApply(key, ev, isOwner) {
+  if (!sageUsage) return;
+  let part = sageUsage.parts.get(key);
+  if (!part) {
+    part = { input: 0, output: 0, cr: 0, cw: 0 };
+    sageUsage.parts.set(key, part);
+  }
+  for (const [field, evKey] of SAGE_USAGE_FIELDS) {
+    const v = ev[evKey] || 0;
+    part[field] = ev.mode === 'set' ? v : part[field] + v;
+  }
+  const u = sageUsage.usage;
+  u.input = u.output = u.cr = u.cw = 0;
+  for (const p of sageUsage.parts.values()) {
+    u.input += p.input;
+    u.output += p.output;
+    u.cr += p.cr;
+    u.cw += p.cw;
+  }
+  u.has = true;
+  if (isOwner) {
+    if (ev.context) u.ctx = ev.context;
+    if (ev.window) u.window = ev.window;
+  }
+  try {
+    renderUsageBar(); // 展示层异常绝不打断流式读取
+  } catch (_) { /* 忽略 */ }
+}
+
+async function runSageStage(options) {
+  const { requirement, prompt, project, sessionId, isOwner, signal, onSession } = options;
+  const executor = options.executor;
+  const agent = executor.id;
+  const runtime = executor.runtime;
+  const initialSessionId = sessionId || null;
+  const stageEffort = options.effort || executor.effort || null;
+  const label = executor.label + (executor.role ? ` · ${executor.role}` : '') +
+    (stageEffort ? ` · ${stageEffort}` : '');
+  const executorPermission = (executor.permissions || []).includes('workspace_write')
+    ? permissionForAgent(runtime)
+    : runtime === 'codex' ? 'read-only' : 'plan';
+  chatMsgs.appendChild(
+    renderDivider(
+      requirement === '__summary__'
+        ? `🤝 SAGE 汇总 · ${label}`
+        : requirement === '__handoff__'
+          ? `🧭 SAGE 移交 · ${label}`
+        : `🤝 SAGE 节点 · ${requirement} · ${label}`
+    )
+  );
+  const bodyEl = el('div', 'msg-asst streaming');
+  chatMsgs.appendChild(bodyEl);
+  const ctx = { bodyEl, lastTool: null, lastGroup: null, planCard: null, fileEdits: new Set() };
+  // 活动条按节点独立：并行波次里多个节点同时跑，共用一条会互相抢占
+  const stage = { ctx, ticker: null, tickerData: null, tickerOpen: false };
+  const usageKey = `${executor.id}:${requirement}`;
+  const startedAt = Date.now();
+  let sid = sessionId || null;
+  let finalText = '';
+  let doneOk = false;
+  let error = '';
+  let textEl = null;
+  const stderrLines = [];
+  let thinking = null;
+  let outputTokens = 0;
+  const ensureText = () => {
+    if (!textEl) {
+      textEl = el('div', 'md');
+      bodyEl.appendChild(textEl);
+    }
+    return textEl;
+  };
+  const appendText = (text) => {
+    finalText = (finalText + text).slice(-24000);
+    renderMarkdown(ensureText(), finalText);
+    bodyEl.appendChild(textEl);
+  };
+  const handler = (ev) => {
+    if (!ev || typeof ev !== 'object') return;
+    // 与主路径一致：只有本来就贴着底部时才跟随滚动，否则用户翻不上去
+    const near = chatNearBottom();
+    switch (ev.t) {
+      case 'run':
+        if (ev.run_id) state.runIds.add(ev.run_id);
+        break;
+      case 'init':
+        if (ev.session_id) {
+          sid = ev.session_id;
+          const visibleOwner = !!(
+            isOwner && state.session &&
+            state.session.agent === runtime &&
+            clientNorm(state.session.project || '') === clientNorm(project || '') &&
+            (initialSessionId ? state.session.id === initialSessionId : !state.session.id)
+          );
+          if (visibleOwner && state.session.id !== sid) {
+            state.session.id = sid;
+            prependConvRow();
+            renderProjects();
+          }
+          if (onSession) onSession(agent, sid);
+          if (
+            visibleOwner && state.pendingSage && state.session && state.session.id === sid
+          ) {
+            sageStoreSave(state.session.agent + ':' + sid, state.pendingSage);
+            state.pendingSage = null;
+          }
+        }
+        break;
+      case 'delta':
+        if (!ev.text) break;
+        removeTicker(stage); // 正文/思考流本身就是可见进度
+        endToolGroup(ctx);
+        if (ev.channel === 'thinking') {
+          if (!thinking) {
+            thinking = thinkingCard('', true);
+            thinking.raw = '';
+            bodyEl.appendChild(thinking);
+          }
+          thinking.raw += ev.text || '';
+          thinking.querySelector('.think-body').textContent = thinking.raw;
+        } else {
+          appendText(ev.text || '');
+        }
+        break;
+      case 'text':
+        removeTicker(stage);
+        endToolGroup(ctx);
+        appendText((finalText ? '\n' : '') + (ev.text || ''));
+        break;
+      case 'thinking':
+        removeTicker(stage);
+        endToolGroup(ctx);
+        bodyEl.appendChild(thinkingCard(ev.text || '', false));
+        break;
+      case 'plan':
+        upsertPlan(ctx, ev.items || []);
+        break;
+      case 'tool_use':
+        appendToolUse(ctx, ev.name || '工具', ev.text || '', ev.id);
+        updateTicker(tickerLabel(ev.name || ''), toolDetail(ev.text || ''), stage);
+        break;
+      case 'tool_result':
+        appendToolResult(ctx, ev.text || '');
+        break;
+      case 'file_edit':
+        if (ev.path) {
+          ctx.fileEdits.add(ev.path);
+          updateTicker(CUR_LANG === 'en' ? 'Editing' : '正在编辑', ev.path, stage);
+        }
+        break;
+      // 子 agent 过程嵌进触发它的工具卡片，与主路径一致
+      case 'sub_text':
+        appendSubEvent(ev.sub, 'text', '', ev.text || '');
+        break;
+      case 'sub_tool':
+        appendSubEvent(ev.sub, 'tool', ev.name || '工具', ev.text || '');
+        break;
+      case 'usage':
+        outputTokens = ev.mode === 'set' ? ev.output || outputTokens : outputTokens + (ev.output || 0);
+        sageUsageApply(usageKey, ev, !!isOwner);
+        break;
+      case 'status':
+        bodyEl.appendChild(el('div', 'status-line', '⏳ ' + (ev.text || '')));
+        break;
+      case 'stderr':
+        if (ev.text) stderrLines.push(ev.text);
+        break;
+      case 'done':
+        if (ev.session_id) sid = ev.session_id;
+        doneOk = !!ev.ok;
+        error = ev.error || '';
+        break;
+      default:
+        break;
+    }
+    if (near) scrollChat();
+  };
+  try {
+    await streamChat(
+      {
+        agent: runtime,
+        project,
+        prompt,
+        session_id: sid,
+        model: executor.model || null,
+        permission: executorPermission,
+        effort: stageEffort,
+        fast: fastForAgent(runtime),
+        memory: state.memOn,
+      },
+      handler,
+      signal
+    );
+  } catch (err) {
+    error = err && err.name === 'AbortError' ? '已停止' : (err && err.message) || String(err);
+  }
+  if (thinking) thinking.classList.remove('open');
+  removeTicker(stage);
+  endToolGroup(ctx);
+  flushFilesCard(ctx);
+  bodyEl.classList.remove('streaming');
+  const importantStderr = stderrLines.filter((line) => !SageScheduler.isBenignStderr(line));
+  if (importantStderr.length) {
+    bodyEl.appendChild(
+      stderrCard(doneOk ? '⚠ 运行提示' : '⚠ 失败详情', importantStderr)
+    );
+  }
+  if (!doneOk) {
+    bodyEl.appendChild(
+      el('div', error === '已停止' ? 'status-line' : 'error-bar', error || '节点执行失败')
+    );
+  } else if (Date.now() - startedAt > 3000) {
+    bodyEl.appendChild(el('div', 'done-line', t('已处理') + ' ' + fmtDuration(Date.now() - startedAt)));
+  }
+  if (finalText) appendMsgActions(bodyEl, finalText.trim());
+  return {
+    agent,
+    runtime,
+    model: executor.model || null,
+    effort: stageEffort,
+    requirement,
+    sessionId: sid,
+    ok: doneOk,
+    error,
+    finalText,
+    outputTokens,
+    latencyMs: Date.now() - startedAt,
+    executed: true,
+  };
+}
+
+/** 官方动态团队 COLLABORATE 执行器：按 requirement DAG 分波次，跨 executor 并行。 */
+async function runSageCollaboration(decision, originalTask) {
+  const owner = decision.primary;
+  const ownerExecutor = sageExecutor(decision, owner);
+  const collaborationProject = state.session.project;
+  const partners = decision.partners || (decision.agents || []).filter((agent) => agent !== owner);
+  const assignments = decision.assignments || {};
+  const dependencies = decision.dependencies || {};
+  const requirementNames = Object.keys(assignments);
+  const pending = new Set(requirementNames);
+  const results = {};
+  const workflowId =
+    decision.workflow_id || `sage-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  decision.workflow_id = workflowId;
+  const sessions = { [owner]: state.session && state.session.id || null };
+  if (state.session && state.session.id) {
+    const links = collabStoreLoad().links[ownerExecutor.runtime + ':' + state.session.id] || [];
+    for (const partner of partners) {
+      const partnerExecutor = sageExecutor(decision, partner);
+      const existing = [...links].reverse().find((link) =>
+        link.executor === partner ||
+        (!link.executor && link.partner.startsWith(partnerExecutor.runtime + ':'))
+      );
+      if (existing) sessions[partner] = existing.partner.slice(existing.partner.indexOf(':') + 1);
+    }
+  }
+  const startedAt = Date.now();
+  const controller = new AbortController();
   state.streaming = true;
   state.runId = null;
+  state.runIds.clear();
+  state.abort = controller;
   setSendButton(true);
-  const ac = new AbortController();
-  state.abort = ac;
-  // 守卫：复查是独立会话，不接管当前会话 id（但记录子会话 id 供关联缝合）
-  const guardSid = { id: null };
-  const guard = (ev) => {
-    if (!ev) return;
-    if (ev.t === 'init') {
-      if (ev.session_id && !guardSid.id) {
-        guardSid.id = ev.session_id;
-        // 拿到 id 立即建立关联 → 右上角面板实时出现（不等复查结束）
-        collabLinkSave(
-          primarySess.agent + ':' + primarySess.id,
-          { partner: collab.partner + ':' + guardSid.id, label: partnerLabel, kind: 'review', ts: Date.now() },
-          collab.partner + ':' + guardSid.id
-        );
-        renderCollabPanel();
-      }
-      return;
+  state.pendingSage = decision;
+  const linkedPartners = new Map();
+  const maybeLinkPartners = () => {
+    const ownerSessionId = sessions[owner];
+    if (!ownerSessionId) return;
+    const primaryKey = ownerExecutor.runtime + ':' + ownerSessionId;
+    for (const partner of partners) {
+      if (!sessions[partner] || linkedPartners.get(partner) === sessions[partner]) continue;
+      const executor = sageExecutor(decision, partner);
+      const cats = requirementNames.filter((name) => assignments[name] === partner);
+      linkedPartners.set(partner, sessions[partner]);
+      collabLinkSave(
+        primaryKey,
+        {
+          partner: executor.runtime + ':' + sessions[partner],
+          executor: partner,
+          model: executor.model,
+          effort: executor.effort || null,
+          label: sageExecutorLabel(decision, partner),
+          kind: 'pipeline',
+          cats: cats.join('、'),
+          workflow_id: workflowId, // 有 id = 官方 DAG，收尾由 __summary__ 负责，不再走旧版回注
+          ts: Date.now(),
+        },
+        executor.runtime + ':' + sessions[partner]
+      );
     }
-    if (ev.t === 'done') {
-      if (stream) {
-        flushFilesCard(stream.ctx);
-        if (!ev.ok) {
-          stream.ctx.bodyEl.appendChild(
-            el('div', 'error-bar', ev.error || t('运行失败（无错误信息）'))
-          );
-        } else if (Date.now() - stream.startedAt > 3000) {
-          stream.ctx.bodyEl.appendChild(
-            el('div', 'done-line', t('已处理') + ' ' + fmtDuration(Date.now() - stream.startedAt))
-          );
-        }
-      }
-      return;
-    }
-    handleEvent(ev);
+    renderCollabPanel();
   };
-  let reviewFinal = '';
-  let reviewOk = false;
+  const onSession = (agent, sid) => {
+    sessions[agent] = sid;
+    if (agent === owner) {
+      sageStoreSave(ownerExecutor.runtime + ':' + sid, decision);
+      state.pendingSage = null;
+    }
+    maybeLinkPartners();
+  };
+  beginSageUsage();
   try {
-    await streamChat(req, guard, ac.signal);
-  } catch (e) {
-    if (stream && e && e.name !== 'AbortError') {
-      stream.ctx.bodyEl.appendChild(el('div', 'error-bar', t('请求失败：') + (e.message || e)));
+    while (pending.size && !controller.signal.aborted) {
+      const wave = SageScheduler.nextWave(pending, results, dependencies, assignments);
+      if (wave.cycle) {
+        for (const name of pending) {
+          results[name] = {
+            agent: assignments[name], requirement: name, ok: false, executed: false,
+            finalText: '', error: '需求 DAG 无可执行节点', latencyMs: 0,
+          };
+          appendSageSkipped(decision, name, '需求 DAG 无可执行节点');
+        }
+        pending.clear();
+        break;
+      }
+      for (const blocked of wave.blocked) {
+        results[blocked.name] = {
+          agent: assignments[blocked.name], requirement: blocked.name, ok: false, executed: false,
+          finalText: '', error: `依赖节点 ${blocked.failedDependency} 失败`, latencyMs: 0,
+        };
+        pending.delete(blocked.name);
+        appendSageSkipped(
+          decision, blocked.name,
+          (CUR_LANG === 'en' ? 'dependency failed: ' : '依赖节点失败：') + blocked.failedDependency
+        );
+      }
+      await SageScheduler.executeWave(wave.groups, async (agent, name) => {
+        if (controller.signal.aborted) return;
+        const dependencyOutputs = (dependencies[name] || []).map((dependency) => {
+          const result = results[dependency];
+          return `【${dependency}】\n${result.finalText || result.error || '无产出'}`;
+        });
+        const result = await runSageStage({
+          executor: sageExecutor(decision, agent),
+          requirement: name,
+          effort: decision.efforts && decision.efforts[name],
+          prompt: sageRequirementPrompt(
+            decision,
+            name,
+            originalTask,
+            dependencyOutputs,
+            workflowId,
+            sessions[owner] ? `${ownerExecutor.runtime}:${sessions[owner]}` : ''
+          ),
+          project: collaborationProject,
+          sessionId: sessions[agent],
+          isOwner: agent === owner,
+          signal: controller.signal,
+          onSession,
+        });
+        sessions[agent] = result.sessionId;
+        results[name] = result;
+        pending.delete(name);
+        maybeLinkPartners();
+      });
     }
+    if (controller.signal.aborted) return;
+    const summary = await runSageStage({
+      executor: sageExecutor(decision, owner),
+      requirement: '__summary__',
+      effort: decision.summary_effort,
+      prompt: sageSummaryPrompt(
+        decision,
+        originalTask,
+        results,
+        workflowId,
+        sessions[owner] ? `${ownerExecutor.runtime}:${sessions[owner]}` : ''
+      ),
+      project: collaborationProject,
+      sessionId: sessions[owner],
+      isOwner: true,
+      signal: controller.signal,
+      onSession,
+    });
+    sessions[owner] = summary.sessionId;
+    maybeLinkPartners();
+    const requirementScores = {};
+    let weighted = 0;
+    let totalWeight = 0;
+    for (const name of requirementNames) {
+      const score = results[name] && results[name].ok ? 1 : 0;
+      const weight = Number((decision.requirements || {})[name] || 0);
+      requirementScores[name] = score;
+      weighted += score * weight;
+      totalWeight += weight;
+    }
+    const agentScores = {};
+    for (const agent of new Set(Object.values(assignments))) {
+      const owned = requirementNames.filter((name) => assignments[name] === agent && results[name]?.executed);
+      if (owned.length) {
+        agentScores[agent] = owned.reduce((sum, name) => sum + (results[name].ok ? 1 : 0), 0) / owned.length;
+      }
+    }
+    await api.post('/api/sage/outcome', {
+      decision_blob: decision.decision_blob,
+      success: totalWeight > 0 ? weighted / totalWeight : summary.ok ? 1 : 0,
+      actual_latency_ms: Date.now() - startedAt,
+      agent_scores: agentScores,
+      requirement_scores: requirementScores,
+    });
+  } catch (error) {
+    chatMsgs.appendChild(el('div', 'error-bar', 'SAGE 协作执行失败：' + (error.message || error)));
   } finally {
-    if (stream) {
-      reviewFinal = stream.finalText || '';
-      reviewOk = !!stream.doneOk;
-    }
-    finalizeStream();
+    endSageUsage();
     state.streaming = false;
     state.abort = null;
     state.runId = null;
+    state.runIds.clear();
+    state.pendingSage = null;
     setSendButton(false);
-    loadConvs(); // 复查会话已落盘，出现在侧栏
-    // 关联持久化：刷新/重开后可把复查内容缝合回主会话
-    if (guardSid.id) {
-      collabLinkSave(
-        primarySess.agent + ':' + primarySess.id,
-        { partner: collab.partner + ':' + guardSid.id, label: partnerLabel, kind: 'review', ts: Date.now() },
-        collab.partner + ':' + guardSid.id
-      );
-    }
-  }
-  // 第三步：复查结论回注主会话，由主 agent 确认/修正收尾（结果沉淀在主会话）
-  if (
-    reviewOk &&
-    reviewFinal.trim() &&
-    state.session &&
-    state.session.id === primarySess.id &&
-    state.session.agent === primarySess.agent
-  ) {
-    if (guardSid.id) {
-      collabLinkMarkFed(primarySess.agent + ':' + primarySess.id, collab.partner + ':' + guardSid.id);
-    }
-    await runPrimaryFollowup(
-      primarySess,
-      (CUR_LANG === 'en' ? '🤝 Feedback · ' : '🤝 复查回注 · ') + primaryLabel +
-        (CUR_LANG === 'en' ? ' wraps up' : ' 收尾'),
-      '【协作复查回注】搭档 agent（' + partnerLabel + '）对你上一轮工作的只读复查意见如下：\n\n' +
-        reviewFinal +
-        '\n\n请核对以上意见：确认无误的部分简要说明；确有问题的部分直接修正并说明改动。'
-    );
+    if (state.stopRequested) state.stopRequested = false;
+    if (state.session) promptInput.placeholder = t('继续这个会话…');
+    promptInput.focus();
+    loadConvs();
+    loadProjects();
   }
 }
 
-/** 分工流水线（库原生 COLLABORATE 语义）：搭档执行其名下需求 → 产出回注主会话汇总。
- *  结束后统一回喂 outcome（整体按需求权重加权，附按 agent / 按需求评分）。 */
-async function runCollabPipeline(collab, primaryText, meta) {
-  if (!state.session || !primaryText.trim()) return;
-  const primarySess = {
-    agent: state.session.agent,
-    id: state.session.id,
-    project: state.session.project,
+/** 官方 HANDOFF：peer 接管所有权并创建新的主会话。 */
+async function runSageHandoff(decision, originalTask) {
+  const previous = state.session;
+  const executor = applySagePrimary(decision);
+  if (state.agentFilter && state.agentFilter !== executor.runtime) setAgentFilter('');
+  state.session = {
+    agent: executor.runtime,
+    id: null,
+    project: previous.project,
+    title: snippet(originalTask, 40),
+    model: executor.model || null,
+    effort: decision.primary_effort || executor.effort || null,
   };
-  const partnerLabel = AGENTS[collab.partner].label;
-  const primaryLabel = AGENTS[primarySess.agent]
-    ? AGENTS[primarySess.agent].label
-    : primarySess.agent;
-  const cats = Object.entries(collab.assignments)
-    .filter(([, a]) => a === collab.partner)
-    .map(([r]) => r);
-  const stageStart = Date.now();
-  chatMsgs.appendChild(
-    renderDivider(
-      (CUR_LANG === 'en' ? '🤝 Division of work · ' : '🤝 分工执行 · ') +
-        partnerLabel + '（' + cats.join('、') + '）'
-    )
-  );
-  scrollChat();
-  const savedHist = state.histUsage;
-  state.histUsage = null; // 分工段是独立新会话，不继承用量基线
-  beginAssistant();
-  state.histUsage = savedHist;
-  const prompt =
-    '【协作分工】路由已按需求把本任务分工，你负责：' + cats.join('、') + '。\n\n' +
-    '原任务：\n' + collab.task + '\n\n' +
-    '主执行者（' + primaryLabel + '）已完成其负责的部分，产出如下：\n' + primaryText + '\n\n' +
-    '请基于以上产出完成你负责的部分（可创建或修改相应文件），最后给出简明的产出说明。';
-  const req = {
-    agent: collab.partner,
-    project: primarySess.project,
-    prompt,
-    session_id: null,
-    model: null,
-    permission: state.permission,
-    effort: null,
-    fast: false,
-    memory: state.memOn,
-  };
+  setChatHead(state.session);
+  setActiveRow(null);
+  state.pendingSage = decision;
   state.streaming = true;
   state.runId = null;
+  state.runIds.clear();
+  const controller = new AbortController();
+  state.abort = controller;
   setSendButton(true);
-  const ac = new AbortController();
-  state.abort = ac;
-  // 守卫：分工段是独立会话，不接管当前会话 id（但记录子会话 id 供关联缝合）
-  const guardSid = { id: null };
-  const guard = (ev) => {
-    if (!ev) return;
-    if (ev.t === 'init') {
-      if (ev.session_id && !guardSid.id) {
-        guardSid.id = ev.session_id;
-        // 拿到 id 立即建立关联 → 右上角面板实时出现（不等分工结束）
-        collabLinkSave(
-          primarySess.agent + ':' + primarySess.id,
-          {
-            partner: collab.partner + ':' + guardSid.id,
-            label: partnerLabel,
-            kind: 'pipeline',
-            cats: cats.join('、'),
-            ts: Date.now(),
-          },
-          collab.partner + ':' + guardSid.id
-        );
-        renderCollabPanel();
-      }
-      return;
-    }
-    if (ev.t === 'done') {
-      if (stream) {
-        flushFilesCard(stream.ctx);
-        if (!ev.ok) {
-          stream.ctx.bodyEl.appendChild(
-            el('div', 'error-bar', ev.error || t('运行失败（无错误信息）'))
-          );
-        } else if (Date.now() - stream.startedAt > 3000) {
-          stream.ctx.bodyEl.appendChild(
-            el('div', 'done-line', t('已处理') + ' ' + fmtDuration(Date.now() - stream.startedAt))
-          );
-        }
-      }
-      return;
-    }
-    handleEvent(ev);
-  };
-  let partnerFinal = '';
-  let partnerOk = false;
-  let partnerOut = 0;
+  const startedAt = Date.now();
+  const workflowId =
+    decision.workflow_id || `sage-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  decision.workflow_id = workflowId;
+  beginSageUsage();
   try {
-    await streamChat(req, guard, ac.signal);
-  } catch (e) {
-    if (stream && e && e.name !== 'AbortError') {
-      stream.ctx.bodyEl.appendChild(el('div', 'error-bar', t('请求失败：') + (e.message || e)));
-    }
+    const result = await runSageStage({
+      executor: sageExecutor(decision, decision.primary),
+      requirement: '__handoff__',
+      effort: decision.primary_effort,
+      prompt:
+        '【SAGE HANDOFF】路由判定你接管本任务的完整所有权。请独立完成并给出最终结果。\n' +
+        `协作标识：${workflowId}\n` +
+        (previous.id ? `来源会话：${previous.agent}:${previous.id}\n` : '') +
+        `任务所有者：${sageExecutorLabel(decision, decision.primary)}\n` +
+        `当前执行者：${sageExecutorLabel(decision, decision.primary)}\n\n` +
+        originalTask,
+      project: state.session.project,
+      sessionId: null,
+      isOwner: true,
+      signal: controller.signal,
+      onSession: (_, sid) => {
+        const targetKey = executor.runtime + ':' + sid;
+        sageStoreSave(targetKey, decision);
+        if (previous.id) {
+          collabLinkSave(
+            previous.agent + ':' + previous.id,
+            {
+              partner: targetKey,
+              executor: decision.primary,
+              model: executor.model || null,
+              effort: decision.primary_effort || executor.effort || null,
+              label: sageExecutorLabel(decision, decision.primary),
+              kind: 'handoff',
+              cats: '',
+              workflow_id: workflowId,
+              ts: Date.now(),
+            },
+            targetKey
+          );
+          if (
+            state.session && state.session.agent === executor.runtime && state.session.id === sid
+          ) {
+            syncBackPrimaryUI(state.session);
+          }
+          loadConvs();
+          loadProjects();
+          renderProjects();
+        }
+      },
+    });
+    if (controller.signal.aborted) return;
+    const requirementScores = Object.fromEntries(
+      Object.keys(decision.assignments || {}).map((name) => [name, result.ok ? 1 : 0])
+    );
+    await api.post('/api/sage/outcome', {
+      decision_blob: decision.decision_blob,
+      success: result.ok ? 1 : 0,
+      actual_latency_ms: Date.now() - startedAt,
+      agent_scores: { [decision.primary]: result.ok ? 1 : 0 },
+      requirement_scores: requirementScores,
+    });
+  } catch (error) {
+    chatMsgs.appendChild(el('div', 'error-bar', 'SAGE 移交失败：' + (error.message || error)));
   } finally {
-    if (stream) {
-      partnerFinal = stream.finalText || '';
-      partnerOk = !!stream.doneOk;
-      partnerOut = (stream.usage && stream.usage.output) || 0;
-    }
-    finalizeStream();
+    endSageUsage();
     state.streaming = false;
     state.abort = null;
     state.runId = null;
+    state.runIds.clear();
+    state.pendingSage = null;
     setSendButton(false);
-    loadConvs(); // 分工会话已落盘
-    // 关联持久化：刷新/重开后可把分工内容缝合回主会话
-    if (guardSid.id) {
-      collabLinkSave(
-        primarySess.agent + ':' + primarySess.id,
-        {
-          partner: collab.partner + ':' + guardSid.id,
-          label: partnerLabel,
-          kind: 'pipeline',
-          cats: cats.join('、'),
-          ts: Date.now(),
-        },
-        collab.partner + ':' + guardSid.id
-      );
-    }
-  }
-  // 统一回喂：整体成功按需求权重加权；附按 agent / 按需求评分（库的证据粒度）
-  if (meta && meta.blob) {
-    const reqW = collab.requirements || {};
-    const requirement_scores = {};
-    let total = 0;
-    let got = 0;
-    for (const [r, a] of Object.entries(collab.assignments)) {
-      const w = reqW[r] || 0;
-      const ok = a === collab.partner ? (partnerOk ? 1 : 0) : 1; // 走到这里说明主执行已成功
-      requirement_scores[r] = ok;
-      total += w;
-      got += w * ok;
-    }
-    const agent_scores = {};
-    agent_scores[meta.primaryAgent] = 1;
-    agent_scores[collab.partner] = partnerOk ? 1 : 0;
-    api
-      .post('/api/sage/outcome', {
-        decision_blob: meta.blob,
-        success: total > 0 ? got / total : partnerOk ? 1 : 0.5,
-        actual_cost: Math.min(1, ((meta.primaryOut || 0) + partnerOut) / 100000),
-        actual_latency_ms: (meta.primaryMs || 0) + (Date.now() - stageStart),
-        agent_scores,
-        requirement_scores,
-      })
-      .catch(() => {});
-  }
-  // 汇总回注：搭档产出交还主 agent 整合收尾
-  if (
-    partnerOk &&
-    partnerFinal.trim() &&
-    state.session &&
-    state.session.id === primarySess.id &&
-    state.session.agent === primarySess.agent
-  ) {
-    if (guardSid.id) {
-      collabLinkMarkFed(primarySess.agent + ':' + primarySess.id, collab.partner + ':' + guardSid.id);
-    }
-    await runPrimaryFollowup(
-      primarySess,
-      (CUR_LANG === 'en' ? '🤝 Consolidate · ' : '🤝 汇总回注 · ') + primaryLabel +
-        (CUR_LANG === 'en' ? ' wraps up' : ' 收尾'),
-      '【协作汇总】搭档 agent（' + partnerLabel + '）已完成其分工（' + cats.join('、') + '），产出如下：\n\n' +
-        partnerFinal +
-        '\n\n请核对搭档产出与你的实现是否一致：有出入的直接修正，并给出本次任务的最终总结。'
-    );
+    if (state.stopRequested) state.stopRequested = false;
+    if (state.session) promptInput.placeholder = t('继续这个会话…');
+    promptInput.focus();
+    loadConvs();
+    loadProjects();
   }
 }
 
@@ -3924,7 +4889,7 @@ async function runPrimaryFollowup(primarySess, dividerText, prompt) {
     model: null,
     permission: state.permission,
     effort: null,
-    fast: false,
+    fast: fastForAgent(primarySess.agent),
     memory: state.memOn,
   };
   state.streaming = true;
@@ -3937,7 +4902,9 @@ async function runPrimaryFollowup(primarySess, dividerText, prompt) {
   } catch (e) {
     if (stream) {
       if (e && e.name === 'AbortError') {
-        stream.ctx.bodyEl.appendChild(el('div', 'status-line', t('↪ 已断开查看，任务在后台继续')));
+        stream.ctx.bodyEl.appendChild(
+          el('div', 'status-line', t(state.stopRequested ? '■ 已停止' : '↪ 已断开查看，任务在后台继续'))
+        );
       } else {
         stream.ctx.bodyEl.appendChild(el('div', 'error-bar', t('请求失败：') + (e.message || e)));
       }
@@ -3947,156 +4914,59 @@ async function runPrimaryFollowup(primarySess, dividerText, prompt) {
     state.streaming = false;
     state.abort = null;
     state.runId = null;
+    state.runIds.clear();
     setSendButton(false);
+    if (state.stopRequested) state.stopRequested = false;
     loadConvs();
-  }
-}
-
-/** 追问分诊：协作会话的追问经 SAGE 判定属搭档擅长域 → 转子会话执行并自动回注。
- *  子会话有搭档完整的分工上下文，执行类追问在那里做比主会话更对口。 */
-async function runDelegatedFollowup(delegate, text) {
-  const primarySess = {
-    agent: state.session.agent,
-    id: state.session.id,
-    project: state.session.project,
-  };
-  appendUserBubble(chatMsgs, text, []);
-  scrollChat();
-  chatMsgs.appendChild(
-    renderDivider(
-      (CUR_LANG === 'en' ? '🤝 Follow-up delegated · ' : '🤝 追问分派 · ') + delegate.label
-    )
-  );
-  const savedHist = state.histUsage;
-  state.histUsage = null;
-  beginAssistant();
-  state.histUsage = savedHist;
-  const i = delegate.partner.indexOf(':');
-  const req = {
-    agent: delegate.agent,
-    project: primarySess.project,
-    prompt:
-      '【协作追问】主会话在你完成分工后收到如下追问，路由判定它属于你的执行领域，' +
-      '请基于你本会话的上下文继续处理：\n\n' + text,
-    session_id: delegate.partner.slice(i + 1),
-    model: null,
-    permission: state.permission,
-    effort: null,
-    fast: false,
-    memory: state.memOn,
-  };
-  state.streaming = true;
-  state.runId = null;
-  setSendButton(true);
-  const ac = new AbortController();
-  state.abort = ac;
-  // 守卫：在子会话续跑，不接管当前（主）会话 id
-  const guard = (ev) => {
-    if (!ev) return;
-    if (ev.t === 'init') return;
-    if (ev.t === 'done') {
-      if (stream) {
-        flushFilesCard(stream.ctx);
-        if (!ev.ok) {
-          stream.ctx.bodyEl.appendChild(
-            el('div', 'error-bar', ev.error || t('运行失败（无错误信息）'))
-          );
-        } else if (Date.now() - stream.startedAt > 3000) {
-          stream.ctx.bodyEl.appendChild(
-            el('div', 'done-line', t('已处理') + ' ' + fmtDuration(Date.now() - stream.startedAt))
-          );
-        }
-      }
-      return;
-    }
-    handleEvent(ev);
-  };
-  let partnerFinal = '';
-  let partnerOk = false;
-  try {
-    await streamChat(req, guard, ac.signal);
-  } catch (e) {
-    if (stream && e && e.name !== 'AbortError') {
-      stream.ctx.bodyEl.appendChild(el('div', 'error-bar', t('请求失败：') + (e.message || e)));
-    }
-  } finally {
-    if (stream) {
-      partnerFinal = stream.finalText || '';
-      partnerOk = !!stream.doneOk;
-    }
-    finalizeStream();
-    state.streaming = false;
-    state.abort = null;
-    state.runId = null;
-    setSendButton(false);
-    loadConvs();
-  }
-  // 证据回喂：分派判定的真实结果
-  if (delegate.decision && delegate.decision.decision_blob) {
-    api
-      .post('/api/sage/outcome', {
-        decision_blob: delegate.decision.decision_blob,
-        success: partnerOk ? 1 : 0,
-      })
-      .catch(() => {});
-  }
-  // 回注：搭档对追问的处理结果交还主会话整合
-  if (
-    partnerOk &&
-    partnerFinal.trim() &&
-    state.session &&
-    state.session.id === primarySess.id &&
-    state.session.agent === primarySess.agent
-  ) {
-    await runPrimaryFollowup(
-      primarySess,
-      (CUR_LANG === 'en' ? '🤝 Consolidate · ' : '🤝 汇总回注 · ') +
-        (AGENTS[primarySess.agent] ? AGENTS[primarySess.agent].label : primarySess.agent) +
-        (CUR_LANG === 'en' ? ' wraps up' : ' 收尾'),
-      '【协作汇总】搭档 agent（' + delegate.label + '）已处理该追问，结果如下：\n\n' +
-        partnerFinal +
-        '\n\n请核对并整合到当前结论中：有出入的直接修正，并简要确认最终状态。'
-    );
   }
 }
 
 async function onSend() {
   if (state.streaming) return;
+  state.runIds.clear();
   const text = promptInput.value.trim();
   const atts = state.attachments.slice();
   if (!text && !atts.length) return;
+  const imgAtts = atts.filter((a) => a.kind !== 'text');
+  const txtAtts = atts.filter((a) => a.kind === 'text');
+  let routingPrompt = text;
+  for (const attachment of txtAtts) {
+    routingPrompt += (routingPrompt ? '\n\n' : '') + attachment.text;
+  }
+  for (const attachment of imgAtts) {
+    routingPrompt +=
+      (routingPrompt ? '\n\n' : '') +
+      `图片/截图/视觉附件：${attachment.name || attachment.path || 'image'}`;
+  }
 
   // SAGE 智能路由：仅新会话、非斜杠命令时决策执行者
   let sageInfo = null;
-  if (state.sageOn && !state.session && text && !text.startsWith('/')) {
+  if (state.sageOn && !state.session && routingPrompt.trim() && !text.startsWith('/')) {
     const btn = $('#sage-btn');
     setToggleChip(btn, t('🧭 路由中…'), true);
     try {
       // 失败重路由：同一任务重发时，把上次失败的执行者交给 ExecutionState.failed_agents
       const failed =
         state.sageFailed && state.sageFailed.task === text ? state.sageFailed.agents : [];
-      sageInfo = await api.post('/api/sage', { prompt: text, agent: state.agent, failed });
-      if (
-        sageInfo &&
-        sageInfo.primary &&
-        AGENTS[sageInfo.primary] &&
-        sageInfo.primary !== state.agent
-      ) {
-        setAgent(sageInfo.primary);
-        const who = AGENTS[sageInfo.primary].label;
+      sageInfo = await api.post(
+        '/api/sage',
+        sageRoutePayload(routingPrompt, state.agent, failed, null)
+      );
+      if (sageInfo && sageInfo.primary) {
+        const primaryExecutor = applySagePrimary(sageInfo);
+        const who = sageExecutorLabel(sageInfo, sageInfo.primary);
         // 侧栏过滤会藏住被移交的新会话 → 自动放行到「全部」
         let extra = '';
-        if (state.agentFilter && state.agentFilter !== sageInfo.primary) {
+        if (state.agentFilter && state.agentFilter !== primaryExecutor.runtime) {
           setAgentFilter('');
           extra = CUR_LANG === 'en' ? ' (sidebar filter reset to All)' : '（侧栏过滤已切回全部）';
         }
-        const partner =
-          sageInfo.partner && AGENTS[sageInfo.partner] ? AGENTS[sageInfo.partner].label : null;
+        const partners = (sageInfo.partners || []).map((id) => sageExecutorLabel(sageInfo, id));
         showToast(
-          (partner
+          (partners.length
             ? CUR_LANG === 'en'
-              ? '🧭 Collaborate: ' + who + ' runs, ' + partner + ' reviews'
-              : '🧭 协作：' + who + ' 执行，' + partner + ' 复查'
+              ? `🧭 Auto team ${sageInfo.team_size}: ${who} owns; ${partners.join(', ')} collaborate`
+              : `🧭 自动团队 ${sageInfo.team_size} 人：${who} 负责汇总；${partners.join('、')} 协作`
             : CUR_LANG === 'en'
               ? '🧭 Routed to ' + who
               : '🧭 已移交给 ' + who + ' 执行') + extra
@@ -4108,8 +4978,7 @@ async function onSend() {
     syncAgentUI();
   }
 
-  // 追问分诊：协作会话的追问先过路由——属搭档擅长域则转子会话执行并回注
-  //（主会话可能规划强执行弱，执行类追问交给有分工上下文的子会话更对口）
+  // 进行中会话的追问也按官方 live state 重新比较 SELF / COLLABORATE / HANDOFF。
   if (
     state.sageOn &&
     state.session &&
@@ -4118,32 +4987,18 @@ async function onSend() {
     !text.startsWith('/') &&
     !atts.length
   ) {
-    const key = state.session.agent + ':' + state.session.id;
-    const links = collabStoreLoad().links[key] || [];
-    const last = links[links.length - 1];
-    const pAgent = last ? last.partner.slice(0, last.partner.indexOf(':')) : null;
-    if (pAgent && pAgent !== state.session.agent && AGENTS[pAgent]) {
-      let d = null;
-      try {
-        d = await api.post('/api/sage', { prompt: text, agent: state.session.agent });
-      } catch (_) {
-        /* 判定失败 → 按主会话执行 */
+    try {
+      sageInfo = await api.post(
+        '/api/sage',
+        sageRoutePayload(routingPrompt, state.session.agent, [], state.session)
+      );
+      if (sageInfo) {
+        const who = sageExecutorLabel(sageInfo, sageInfo.primary);
+        const mode = { self: '继续当前', collaborate: '协作', handoff: '移交' }[sageInfo.mode] || sageInfo.mode;
+        showToast(`🧭 ${mode} → ${who}`);
       }
-      if (d && d.primary === pAgent) {
-        hideComposerError();
-        promptInput.value = '';
-        autoGrow();
-        showToast(
-          CUR_LANG === 'en'
-            ? '🧭 Follow-up suits ' + last.label + ' — running in sub-session, will consolidate back'
-            : '🧭 该追问更适合 ' + last.label + '，转子会话执行，完成后回注'
-        );
-        await runDelegatedFollowup(
-          { partner: last.partner, agent: pAgent, label: last.label, decision: d },
-          text
-        );
-        return;
-      }
+    } catch (_) {
+      sageInfo = null; // 重规划失败回退当前会话，不阻塞追问
     }
   }
 
@@ -4159,6 +5014,8 @@ async function onSend() {
       id: null,
       project: state.project,
       title: snippet(text || (firstTxtAtt ? firstTxtAtt.name : '[图片]'), 40),
+      model: state.model,
+      effort: state.effort,
     };
     showChat();
     chatMsgs.textContent = '';
@@ -4170,8 +5027,6 @@ async function onSend() {
   autoGrow();
   state.attachments = [];
   renderAttachBar();
-  const imgAtts = atts.filter((a) => a.kind !== 'text');
-  const txtAtts = atts.filter((a) => a.kind === 'text');
   // 气泡里长文本附件只显示摘要行（完整内容仍随 prompt 发送并落盘）
   const bubbleText =
     text +
@@ -4180,10 +5035,10 @@ async function onSend() {
       .join('');
   appendUserBubble(chatMsgs, bubbleText.trim(), imgAtts.map((a) => imageEl(a.path)));
   scrollChat();
-  beginAssistant();
   if (sageInfo) {
-    stream.ctx.bodyEl.appendChild(sageCard(sageInfo));
-    stream.ctx.bodyEl.appendChild(cursorEl);
+    const decisionBody = el('div', 'msg-asst sage-decision');
+    decisionBody.appendChild(sageCard(sageInfo));
+    chatMsgs.appendChild(decisionBody);
     state.pendingSage = sageInfo; // init 事件一到（几秒内）就落盘，防中途刷新丢失
   }
 
@@ -4195,6 +5050,18 @@ async function onSend() {
   for (const a of imgAtts) {
     finalPrompt += (finalPrompt ? '\n\n' : '') + '请查看图片文件: ' + a.path;
   }
+  finalPrompt = withTeamPreamble(finalPrompt, state.session.agent);
+
+  if (sageInfo && sageInfo.mode === 'collaborate' && (sageInfo.partners || []).length) {
+    await runSageCollaboration(sageInfo, finalPrompt);
+    return;
+  }
+  if (sageInfo && sageInfo.mode === 'handoff') {
+    await runSageHandoff(sageInfo, finalPrompt);
+    return;
+  }
+
+  beginAssistant();
 
   const req = {
     agent: state.session.agent,
@@ -4203,8 +5070,8 @@ async function onSend() {
     session_id: state.session.id,
     model: state.model,
     permission: state.permission,
-    effort: state.effort,
-    fast: state.fast, // claude=fastMode；codex=service_tier fast/standard
+    effort: sageInfo && sageInfo.primary_effort ? sageInfo.primary_effort : state.effort,
+    fast: fastForAgent(state.session.agent),
     memory: state.memOn,
   };
   state.streaming = true;
@@ -4212,28 +5079,19 @@ async function onSend() {
   setSendButton(true);
   const ac = new AbortController();
   state.abort = ac;
-  // 协作条件：路由给出了搭档（新会话首轮才有 sageInfo）
-  const collab =
-    sageInfo && sageInfo.partner && AGENTS[sageInfo.partner]
-      ? {
-          partner: sageInfo.partner,
-          task: text,
-          assignments: sageInfo.assignments || {},
-          requirements: sageInfo.requirements || {},
-        }
-      : null;
   let primaryFinal = '';
   let primaryOk = false;
   let primaryAborted = false;
   let primaryMs = null;
-  let primaryOut = 0;
   try {
     await streamChat(req, handleEvent, ac.signal);
   } catch (err) {
     if (stream) {
       if (err && err.name === 'AbortError') {
         primaryAborted = true;
-        stream.ctx.bodyEl.appendChild(el('div', 'status-line', t('↪ 已断开查看，任务在后台继续')));
+        stream.ctx.bodyEl.appendChild(
+          el('div', 'status-line', t(state.stopRequested ? '■ 已停止' : '↪ 已断开查看，任务在后台继续'))
+        );
       } else {
         stream.ctx.bodyEl.appendChild(el('div', 'error-bar', t('请求失败：') + ((err && err.message) || err)));
       }
@@ -4243,13 +5101,14 @@ async function onSend() {
       primaryFinal = stream.finalText || '';
       primaryOk = !!stream.doneOk;
       primaryMs = Date.now() - stream.startedAt;
-      primaryOut = (stream.usage && stream.usage.output) || 0;
     }
     finalizeStream();
     state.streaming = false;
     state.abort = null;
     state.runId = null;
+    state.runIds.clear();
     setSendButton(false);
+    if (state.stopRequested) state.stopRequested = false;
     // 若期间已切回 Hero（新建会话），不要覆盖它的 placeholder
     if (state.session) promptInput.placeholder = t('继续这个会话…');
     promptInput.focus();
@@ -4262,14 +5121,7 @@ async function onSend() {
     }
     state.pendingSage = null;
   }
-  // 门控：搭档名下需求权重 ≥ 0.25 → 库原生的分工流水线；否则复查回注
-  const partnerWeight = collab
-    ? Object.entries(collab.assignments)
-        .filter(([, a]) => a === collab.partner)
-        .reduce((s, [r]) => s + (collab.requirements[r] || 0), 0)
-    : 0;
-  const usePipeline = !!(collab && partnerWeight >= 0.25);
-  // SAGE 证据回喂（断开查看≠失败，不回喂；流水线模式在全部阶段结束后统一回喂）
+  // SELF / HANDOFF 结果回喂；COLLABORATE 已由官方 DAG 执行器统一回喂。
   if (sageInfo && sageInfo.decision_blob && !primaryAborted) {
     if (primaryOk) {
       state.sageFailed = null;
@@ -4278,32 +5130,22 @@ async function onSend() {
         state.sageFailed && state.sageFailed.task === text
           ? state.sageFailed
           : { task: text, agents: [] };
-      if (!f.agents.includes(req.agent)) f.agents.push(req.agent);
+      const failedExecutor = sageInfo.primary || req.agent;
+      if (!f.agents.includes(failedExecutor)) f.agents.push(failedExecutor);
       state.sageFailed = f;
     }
-    if (!(usePipeline && primaryOk && state.session)) {
-      api
-        .post('/api/sage/outcome', {
-          decision_blob: sageInfo.decision_blob,
-          success: primaryOk ? 1 : 0,
-          actual_cost: Math.min(1, primaryOut / 100000),
-          actual_latency_ms: primaryMs,
-        })
-        .catch(() => {});
-    }
-  }
-  // 主执行成功且有搭档 → 分工流水线 或 复查回注（用户仍停留在本会话时）
-  if (collab && primaryOk && state.session) {
-    if (usePipeline) {
-      await runCollabPipeline(collab, primaryFinal, {
-        blob: sageInfo.decision_blob,
-        primaryAgent: state.session.agent,
-        primaryMs,
-        primaryOut,
-      });
-    } else {
-      await runCollabReview(collab, primaryFinal);
-    }
+    const requirementScores = Object.fromEntries(
+      Object.keys(sageInfo.assignments || {}).map((name) => [name, primaryOk ? 1 : 0])
+    );
+    api
+      .post('/api/sage/outcome', {
+        decision_blob: sageInfo.decision_blob,
+        success: primaryOk ? 1 : 0,
+        actual_latency_ms: primaryMs,
+        agent_scores: { [sageInfo.primary]: primaryOk ? 1 : 0 },
+        requirement_scores: requirementScores,
+      })
+      .catch(() => {});
   }
 }
 
@@ -4428,8 +5270,14 @@ function bindEvents() {
     showMenu(e.currentTarget, agentMenuItems(), (it) => setAgent(it.value));
   });
 
-  // 快速开关（仅 claude 可见）：切 fastMode，与思考等级相互独立
+  // Claude 可手动切 fastMode；Codex 所有模型固定使用 service_tier=fast。
   $('#fast-btn').addEventListener('click', () => {
+    if (currentAgent() === 'codex') {
+      showToast(CUR_LANG === 'en'
+        ? 'Fast mode is always enabled for every Codex model'
+        : 'Codex 所有模型固定使用 Fast 模式');
+      return;
+    }
     state.fast = !state.fast;
     syncAgentUI();
     savePrefs();
@@ -4438,6 +5286,11 @@ function bindEvents() {
   // SAGE 智能路由开关
   $('#sage-btn').addEventListener('click', () => {
     state.sageOn = !state.sageOn;
+    if (state.sageOn && state.teamOn) {
+      state.teamOn = false;
+      localStorage.setItem('ah-team', '0');
+      showToast(CUR_LANG === 'en' ? 'Team mode turned off: it cannot be combined with smart routing' : '已关闭团队模式：不能与智能路由同时开启');
+    }
     localStorage.setItem('ah-sage', state.sageOn ? '1' : '0');
     syncAgentUI();
   });
@@ -4446,6 +5299,26 @@ function bindEvents() {
   $('#mem-btn').addEventListener('click', () => {
     state.memOn = !state.memOn;
     localStorage.setItem('ah-mem', state.memOn ? '1' : '0');
+    syncAgentUI();
+  });
+
+  // 团队模式：点击开关；已开启时再点在 2..5 间循环队员数，到顶关闭
+  $('#team-btn').addEventListener('click', () => {
+    if (!state.teamOn) {
+      state.teamOn = true;
+      if (state.sageOn) {
+        state.sageOn = false;
+        localStorage.setItem('ah-sage', '0');
+        showToast(CUR_LANG === 'en' ? 'Smart routing turned off: it cannot be combined with team mode' : '已关闭智能路由：不能与团队模式同时开启');
+      }
+    } else if (state.teamSize < 5) {
+      state.teamSize++;
+    } else {
+      state.teamOn = false;
+      state.teamSize = 3;
+    }
+    localStorage.setItem('ah-team', state.teamOn ? '1' : '0');
+    localStorage.setItem('ah-team-n', String(state.teamSize));
     syncAgentUI();
   });
 
@@ -4473,6 +5346,10 @@ function bindEvents() {
   // 思考等级下拉（等级列表与默认值来自 /api/models）
   $('#effort-btn').addEventListener('click', async (e) => {
     e.stopPropagation();
+    if (state.sageOn) {
+      showToast(CUR_LANG === 'en' ? 'SAGE chooses reasoning effort automatically' : '智能路由开启时，思考强度由 SAGE 自动选择');
+      return;
+    }
     const anchor = e.currentTarget;
     let info = { efforts: [], default_effort: null };
     try {
@@ -4758,11 +5635,15 @@ function init() {
   autoGrow();
   showHero();
   loadStatus();
+  getEditors();
   loadProjects();
   loadConvs();
-  checkActiveRuns();
+  const restoredAfterReload = restoreReloadState();
+  if (!restoredAfterReload) checkActiveRuns();
+  checkServerInstance();
   pollRuns();
   setInterval(pollRuns, 5000); // 侧栏运行状态标识轮询
+  setInterval(checkServerInstance, 3000); // 部署后旧标签页自动刷新到新实例
   // 相对时间原地刷新：渲染时算好的「刚刚/N 分钟前」不会自己走，
   // 页面久挂不重载列表就会停在旧值——每分钟按 data-ts 重算一遍
   setInterval(() => {

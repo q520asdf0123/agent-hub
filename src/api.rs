@@ -18,6 +18,7 @@ use crate::types::{ChatReq, ProjectInfo, SessionSummary};
 pub struct AppState {
     pub config: RwLock<Config>,
     pub runs: crate::run::RunRegistry,
+    pub instance_id: String,
 }
 
 impl AppState {
@@ -25,6 +26,14 @@ impl AppState {
         Self {
             config: RwLock::new(config::load()),
             runs: crate::run::RunRegistry::default(),
+            instance_id: format!(
+                "{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_millis())
+                    .unwrap_or(0)
+            ),
         }
     }
 }
@@ -48,6 +57,16 @@ pub async fn app_js() -> impl IntoResponse {
             (header::CACHE_CONTROL, "no-store"),
         ],
         include_str!("../static/app.js"),
+    )
+}
+
+pub async fn sage_scheduler_js() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        include_str!("../static/sage-scheduler.js"),
     )
 }
 
@@ -75,6 +94,10 @@ pub async fn style_css() -> impl IntoResponse {
 
 pub async fn status() -> impl IntoResponse {
     Json(crate::cli::status().await)
+}
+
+pub async fn instance(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(json!({ "instance_id": state.instance_id }))
 }
 
 // ---------- GET /api/skills ----------
@@ -105,14 +128,50 @@ pub struct SageReq {
     pub agent: Option<String>,
     /// 本任务此前已失败过的 agent（ExecutionState.failed_agents，触发失败重路由）
     pub failed: Option<Vec<String>>,
+    /// 官方 ExecutionState 的前端可观测部分。
+    pub state: Option<serde_json::Value>,
+    /// Task 约束；服务端会覆盖 available_agents，避免选择未安装 CLI。
+    pub constraints: Option<serde_json::Value>,
 }
 
-pub async fn sage_route(Json(body): Json<SageReq>) -> Response {
+pub async fn sage_route(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<SageReq>,
+) -> Response {
     let failed = body.failed.unwrap_or_default();
+    let status = crate::cli::status().await;
+    let mut available = Vec::new();
+    if status.claude.installed {
+        available.push("claude");
+    }
+    if status.codex.installed {
+        available.push("codex");
+    }
+    let mut constraints = match body.constraints.unwrap_or_else(|| json!({})) {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    constraints.insert("available_agents".to_string(), json!(available));
+    let mut active_counts: HashMap<String, usize> = HashMap::new();
+    for (_, run) in state.runs.list_all() {
+        if !run.is_done() {
+            *active_counts.entry(run.agent.clone()).or_default() += 1;
+        }
+    }
+    let loads = active_counts
+        .into_iter()
+        .map(|(agent, count)| (agent, (count as f64 / 4.0).min(1.0)))
+        .collect::<HashMap<_, _>>();
+    constraints.insert("loads".to_string(), json!(loads));
+    if let Ok(models) = tokio::task::spawn_blocking(crate::models::discover).await {
+        constraints.insert("model_catalog".to_string(), json!(models));
+    }
     match crate::sage::route(
         &body.prompt,
         body.agent.as_deref().unwrap_or("claude"),
         &failed,
+        body.state.unwrap_or_else(|| json!({})),
+        serde_json::Value::Object(constraints),
     )
     .await
     {
@@ -168,6 +227,8 @@ pub struct OpenReq {
     pub project: Option<String>,
     /// "reveal" = 在资源管理器中定位该文件；缺省 = 智能打开
     pub mode: Option<String>,
+    /// 指定受支持的本机应用 ID；缺省时沿用原有智能打开逻辑。
+    pub app: Option<String>,
 }
 
 /// 代码 / 文本类扩展名：进编辑器（支持跳行）；其余（Excel/Word/图片/PDF 等）走系统默认程序。
@@ -207,32 +268,17 @@ fn is_text_file(p: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// VS Code 真实可执行（bin\code.cmd → ..\Code.exe），结果缓存。
-fn find_vscode() -> Option<std::path::PathBuf> {
-    static CACHE: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let out = std::process::Command::new("where").arg("code").output().ok()?;
-            if !out.status.success() {
-                return None;
-            }
-            for line in String::from_utf8_lossy(&out.stdout).lines() {
-                let l = line.trim();
-                let p = Path::new(l);
-                if l.to_ascii_lowercase().ends_with(".exe") && p.is_file() {
-                    return Some(p.to_path_buf());
-                }
-                // bin\code 或 bin\code.cmd → 上两级的 Code.exe
-                if let Some(root) = p.parent().and_then(|d| d.parent()) {
-                    let exe = root.join("Code.exe");
-                    if exe.is_file() {
-                        return Some(exe);
-                    }
-                }
-            }
-            None
-        })
-        .clone()
+// ---------- GET /api/editors（本机已安装编辑器 / IDE） ----------
+
+pub async fn editors() -> Response {
+    match tokio::task::spawn_blocking(crate::editors::list).await {
+        Ok(list) => Json(list).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("编辑器检测失败: {e}")})),
+        )
+            .into_response(),
+    }
 }
 
 pub async fn open_path(Json(body): Json<OpenReq>) -> Response {
@@ -268,9 +314,51 @@ pub async fn open_path(Json(body): Json<OpenReq>) -> Response {
                 .into_response(),
         };
     }
+
+    // 项目目录右键菜单指定的打开方式。应用 ID 只能映射到后端已检测到的程序，
+    // 不接受前端传入任意可执行路径。
+    if let Some(app) = body.app.as_deref() {
+        let spawned = match app {
+            "explorer" => std::process::Command::new("explorer.exe").arg(&p).spawn(),
+            "terminal" => std::process::Command::new("wt.exe")
+                .arg("-d")
+                .arg(&p)
+                .spawn()
+                .or_else(|_| {
+                    let cwd = if p.is_dir() {
+                        p.as_path()
+                    } else {
+                        p.parent().unwrap_or(&p)
+                    };
+                    std::process::Command::new("powershell.exe")
+                        .arg("-NoExit")
+                        .current_dir(cwd)
+                        .spawn()
+                }),
+            editor_id => {
+                let Some(exe) = crate::editors::executable(editor_id) else {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(json!({"error": format!("未检测到可用应用: {editor_id}")})),
+                    )
+                        .into_response();
+                };
+                std::process::Command::new(exe).arg(&p).spawn()
+            }
+        };
+        return match spawned {
+            Ok(_) => Json(json!({"ok": true, "app": app})).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("打开失败: {e}")})),
+            )
+                .into_response(),
+        };
+    }
+
     // 代码/文本 + 检测到 VS Code → 编辑器打开并跳行；其余走系统默认程序
     let spawned = if p.is_file() && is_text_file(&p) {
-        if let Some(code) = find_vscode() {
+        if let Some(code) = crate::editors::executable("vscode") {
             let target = match line {
                 Some(n) => format!("{}:{}", p.display(), n),
                 None => p.display().to_string(),
@@ -857,6 +945,7 @@ pub async fn runs_list(State(state): State<Arc<AppState>>) -> impl IntoResponse 
                 "agent": r.agent,
                 "project": r.project,
                 "prompt": r.prompt,
+                "sage": r.sage.clone(),
                 "session_id": r.session_id.lock().unwrap().clone(),
                 "running": !r.is_done(),
                 "ok": outcome.as_ref().map(|o| o.0),
@@ -1002,7 +1091,8 @@ pub async fn stop_run(
     State(state): State<Arc<AppState>>,
     Json(body): Json<StopReq>,
 ) -> impl IntoResponse {
-    Json(json!({ "ok": state.runs.stop(&body.run_id) }))
+    let ok = state.runs.stop(&body.run_id);
+    Json(json!({ "ok": ok, "status": if ok { "stopping" } else { "not_found" } }))
 }
 
 // ---------- 标题覆盖（分叉会话等取不到标题的场景） ----------

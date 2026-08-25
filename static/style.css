@@ -22,6 +22,9 @@
   --code-fg: #e0c9a6;
   --accent: #d97848;
   --accent2: #e8964a;
+  --accent-soft: rgba(217, 120, 72, 0.09);
+  --accent-line: rgba(232, 150, 74, 0.32);
+  --inline-code-bg: rgba(255, 255, 255, 0.045);
   --claude: #e8734a;
   --codex: #4a90e8;
   --ok: #4caf7d;
@@ -49,6 +52,9 @@
   --title: #1e1e20;
   --title-strong: #000000;
   --code-fg: #8a5a12;
+  --accent-soft: #fff7f0;
+  --accent-line: rgba(217, 120, 72, 0.28);
+  --inline-code-bg: #f4f1ec;
 }
 
 * {
@@ -773,10 +779,11 @@ button { font-family: inherit; }
 }
 .chip.on:hover { color: var(--accent2); }
 
-/* 滑动开关 chip（快速 / 智能路由 / 记忆）：文案 + 滑轨圆钮 */
+/* 滑动开关 chip（快速 / 智能路由 / 记忆 / 团队）：文案 + 滑轨圆钮 */
 #fast-btn,
 #sage-btn,
-#mem-btn {
+#mem-btn,
+#team-btn {
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -869,22 +876,52 @@ button { font-family: inherit; }
   position: absolute;
   top: 64px;
   right: 18px;
-  width: 216px;
+  width: 268px;
   z-index: 30;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 8px;
+  max-height: calc(100vh - 110px);
+  overflow-y: auto;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+}
+/* 面板是浮层：展开时把正文列的居中区域收到面板左侧，否则会压住消息右缘。
+   clamp 保证窄窗口下先保住正文宽度（最少 560px）再让位；
+   footer 补上自身的 20px 左右内边距，正文与输入框保持同一条中轴。 */
+#collab-panel:not(.hidden) ~ #chat-scroll {
+  padding-right: clamp(0px, 100% - 560px, 294px);
+}
+#collab-panel:not(.hidden) ~ #chat-footer {
+  padding-right: calc(20px + clamp(0px, 100% - 560px, 294px));
+}
+/* 窄窗口容不下 268px 面板 + 560px 正文：面板先瘦身，正文下限一并放宽，
+   否则让位量被 clamp 卡住，面板又会压回正文上。 */
+@media (max-width: 1200px) {
+  #collab-panel { width: 208px; }
+  #collab-panel:not(.hidden) ~ #chat-scroll {
+    padding-right: clamp(0px, 100% - 420px, 234px);
+  }
+  #collab-panel:not(.hidden) ~ #chat-footer {
+    padding-right: calc(20px + clamp(0px, 100% - 420px, 234px));
+  }
 }
 .collab-panel-title {
   font-size: 11px;
   color: var(--dim);
   padding: 2px 6px 6px;
 }
+.collab-panel-section {
+  margin: 5px 4px 2px;
+  padding: 7px 2px 2px;
+  border-top: 1px solid var(--border);
+  color: var(--dim);
+  font-size: 10px;
+}
+.collab-panel-global { opacity: 0.88; }
 .collab-panel-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 7px;
   padding: 6px 6px;
   border-radius: 7px;
@@ -893,16 +930,30 @@ button { font-family: inherit; }
   color: var(--fg2);
 }
 .collab-panel-row:hover { background: var(--hover); }
-.collab-panel-name {
+.collab-panel-main {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.collab-panel-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.collab-panel-st { flex: none; font-size: 11px; }
+.collab-panel-nodes {
+  color: var(--dim);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.collab-panel-st { flex: none; font-size: 11px; padding-top: 1px; }
 .collab-panel-st.ok { color: #4ab87a; }
 .collab-panel-st.err { color: #e05252; }
+.collab-panel-st.stopped { color: var(--dim); }
+.collab-panel-st.unknown { color: var(--faint); }
 .collab-panel-st.run {
   color: var(--accent2);
   animation: ticker-pulse 1.1s ease-in-out infinite;
@@ -910,10 +961,12 @@ button { font-family: inherit; }
 
 /* 助手消息悬浮操作栏：复制 / 分支（悬停显现） */
 .msg-asst { position: relative; }
+/* 留在文档流里跟在消息末尾（绝对定位会浮到后续正文上）；
+   按钮压扁到 20px 以减少每条消息的固定占位 */
 .msg-actions {
   display: flex;
   gap: 4px;
-  margin-top: 6px;
+  margin-top: 2px;
   opacity: 0;
   transition: opacity 0.15s;
 }
@@ -923,9 +976,9 @@ button { font-family: inherit; }
   background: var(--panel);
   color: var(--dim);
   border-radius: 6px;
-  width: 26px;
-  height: 22px;
-  font-size: 13px;
+  width: 24px;
+  height: 20px;
+  font-size: 12.5px;
   line-height: 1;
   cursor: pointer;
 }
@@ -1171,15 +1224,9 @@ button { font-family: inherit; }
 
 /* ---------- 极简标记样式（参考 Codex Desktop 排版）覆写 ---------- */
 
-.msg-asst { margin: 22px 0; }
-.md { margin: 10px 0; line-height: 1.78; }
-.md-code {
-  border-radius: 6px;
-  padding: 1.5px 7px;
-  background: var(--bubble);
-  border: 1px solid var(--border2);
-}
-.tgroup { margin: 16px 0; }
+.msg-asst { margin: 14px 0; }
+/* .md / .md-code 的正文排版统一放在下方「Markdown 完整渲染」一节，此处不再重复。 */
+.tgroup { margin: 8px 0; }
 .tgroup-head {
   padding: 2px 2px;
   gap: 8px;
@@ -1319,15 +1366,15 @@ button { font-family: inherit; }
   border: 1px solid var(--border);
   border-radius: 10px;
   overflow: hidden;
-  margin: 10px 0;
+  margin: 8px 0;
   background: var(--code-bg);
 }
 .codeblock-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 5px 12px;
-  background: var(--panel);
+  padding: 6px 14px;
+  background: var(--code-bg);
   border-bottom: 1px solid var(--border);
 }
 .codeblock-lang {
@@ -1346,6 +1393,7 @@ button { font-family: inherit; }
   transition: color 0.15s, background 0.15s;
 }
 .codeblock-copy:hover { color: var(--fg); background: var(--hover); }
+/* 内层 pre 自带边框/圆角/外边距，嵌进代码块会形成双层盒子 —— 就地清掉 */
 .codeblock .md-pre {
   border: none;
   border-radius: 0;
@@ -1449,6 +1497,7 @@ button { font-family: inherit; }
 }
 .run-badge.ok { color: var(--ok); }
 .run-badge.err { color: var(--danger); }
+.run-badge.stopped { color: var(--dim); }
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.25; }
@@ -1586,27 +1635,102 @@ button { font-family: inherit; }
 
 /* ---------- Markdown 完整渲染 ---------- */
 
-.md-hd { font-weight: 700; color: var(--title); margin: 16px 0 6px; line-height: 1.4; }
+.md {
+  margin: 8px 0;
+  color: var(--fg2);
+  line-height: 1.75;
+}
+.md-text {
+  margin: 0 0 10px;
+}
+.md-hd {
+  color: var(--title);
+  font-weight: 700;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+}
+.md > .md-hd {
+  position: relative;
+  margin: 26px 0 10px;
+  padding-left: 13px;
+}
+.md > .md-hd::before {
+  content: "";
+  position: absolute;
+  top: 0.18em;
+  bottom: 0.18em;
+  left: 0;
+  width: 3px;
+  border-radius: 999px;
+  background: var(--accent2);
+}
 .md-h1 { font-size: 20px; }
-.md-h2 { font-size: 17.5px; }
-.md-h3 { font-size: 15.5px; }
+.md-h2 { font-size: 17px; }
+.md-h3 { font-size: 15px; }
 .md-h4 { font-size: 14px; }
-.md-hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+.md-lead {
+  margin: 2px 0 24px;
+  padding: 16px 18px 15px;
+  border: 1px solid var(--accent-line);
+  border-left: 4px solid var(--accent2);
+  border-radius: 12px;
+  background: linear-gradient(135deg, var(--accent-soft), transparent 78%);
+}
+.md-lead > .md-hd {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 0 8px;
+  color: var(--title-strong);
+  font-size: 17px;
+}
+.md-lead > .md-hd::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--accent2);
+  box-shadow: 0 0 0 4px var(--accent-soft);
+}
+.md-lead > :last-child { margin-bottom: 0; }
+.md-hr { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
 .md-quote {
-  margin: 10px 0;
-  padding: 6px 14px;
-  border-left: 3px solid var(--border2);
-  color: var(--dim);
+  margin: 12px 0;
+  padding: 9px 14px;
+  border-left: 3px solid var(--accent-line);
+  border-radius: 0 8px 8px 0;
+  background: var(--hover2);
+  color: var(--fg2);
   white-space: pre-wrap;
 }
-.md-list { margin: 8px 0; padding-left: 24px; }
-.md-list li { margin: 4px 0; line-height: 1.7; white-space: pre-wrap; }
-.md-list .md-list { margin: 2px 0; }
-.md-b { font-weight: 700; color: var(--title); }
+.md-list { margin: 10px 0 14px; padding-left: 22px; }
+.md-list li {
+  margin: 7px 0;
+  padding-left: 4px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+}
+.md-list li::marker { color: var(--accent); font-weight: 700; }
+.md-list .md-list {
+  margin: 6px 0 2px 2px;
+  padding-left: 20px;
+  border-left: 1px solid var(--border);
+}
+.md-b { font-weight: 700; color: var(--title-strong); }
 .md-del { color: var(--dim); }
+.md-code {
+  padding: 1px 5px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: var(--inline-code-bg);
+  color: var(--code-fg);
+  font-size: 0.9em;
+  font-weight: 500;
+}
 .md-table {
   border-collapse: collapse;
-  margin: 10px 0;
+  margin: 14px 0;
   font-size: 13.5px;
   max-width: 100%;
   display: block;

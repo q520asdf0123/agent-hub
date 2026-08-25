@@ -13,8 +13,10 @@ A web UI for your local CLI agents — **Claude Code** and **Codex**. A single R
 - **Dual CLI detection & streaming chat**: auto-detects local `claude` / `codex` installations (resolving the real `.exe` behind npm shims), drives them in headless mode, and renders text / thinking / tool calls from the NDJSON stream in real time
 - **Browse & resume history**: reads both CLIs' native session storage (`~/.claude/projects/`, `~/.codex/sessions/`) directly — view any past transcript and `resume` it; fully interoperable with terminal sessions
 - **Multi-project management**: discovers projects from history, import the ones you want into the sidebar; filter sessions by agent (All / Claude / Codex)
-- **Background tasks**: refreshing or closing the page never interrupts a running task — reopen and it reconnects to the live output automatically; only the Stop button kills the process; sidebar shows live status (running ● / done ✓ / failed ✕)
-- **SAGE smart routing**: integrates [sprix-sage-router](https://github.com/wang2122/sprix-sage-router) to automatically pick the best executor (Claude vs Codex) per task, with an explainable decision card
+- **Background tasks**: refreshing or closing the page never interrupts a running task — reopen and it reconnects to the live output automatically; Stop terminates the complete SAGE workflow process tree and confirms completion; sidebar shows running ● / done ✓ / stopped ■ / failed ✕
+- **Deployment-aware UI**: an open tab detects a restarted local backend, preserves its current session and draft, then automatically reloads the newly embedded frontend instead of continuing with stale JavaScript
+- **SAGE smart routing**: builds a candidate pool from locally discovered `CLI + model` executors, automatically chooses team size, models, and per-requirement reasoning effort, then executes official `SELF / COLLABORATE / HANDOFF` assignments through requirement-DAG waves — serial within one executor, parallel across independent executors — with executor/effort/requirement evidence feedback; automatic effort for GPT-5.6 Sol is capped at `xhigh`, while Luna/mini/Spark-class economical models may reach `max` when supported
+- **Codex Fast by default and by enforcement**: every Codex model invocation uses request-level `service_tier="fast"`; the UI shows the switch as always on and does not allow it to be disabled
 - **Skills / command palette**: type `/` to open — aggregates Claude skills (user / project / plugins), Codex skills & custom prompts, and built-in commands (`/review`, `/init`, `/diff`, `/status`, `/fork`…); keyboard navigation; per-skill color coding
 - **Full image pipeline**: paste screenshots into the composer to send to the CLI; historical images render inline; click for a zoomable lightbox
 - **Edited-files card**: each turn summarizes changed files (collapsed by default); click a row for a GitHub-style diff review (line numbers, full-row coloring, nested git repos and committed-change fallback supported); right-click to open in VS Code / File Explorer
@@ -81,6 +83,10 @@ src/
 ├─ skills.rs      # skills / command scanning
 └─ sage.rs        # SAGE routing bridge (Python subprocess)
 static/           # frontend (vanilla JS, embedded into the binary at compile time)
+├─ index.html
+├─ app.js
+├─ sage-scheduler.js      # testable SAGE requirement-DAG wave scheduler
+└─ style.css
 vendor/sprix-sage-router/   # SAGE algorithm library (MIT, LICENSE included)
 docs/             # technical plan (PLAN.md) and module contract (CONTRACT.md)
 ```
@@ -90,6 +96,7 @@ docs/             # technical plan (PLAN.md) and module contract (CONTRACT.md)
 - `~/.agenthub/config.json`: imported project list (maintained via the UI)
 - Skill sources: `~/.claude/skills/`, project `.claude/skills/`, installed plugins, `~/.codex/skills/`, `~/.codex/prompts/`
 - SAGE capability profiles: `DEFAULT_PROFILES` in `vendor/sprix-sage-router/sage_bridge.py`, tune to taste
+- SAGE learning state: `~/.agenthub/sage_state.json`; execution-semantics or model-pool schema upgrades back up and migrate the prior state automatically
 
 ## Security notes
 

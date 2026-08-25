@@ -9,7 +9,7 @@ use std::convert::Infallible;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::http::header;
@@ -55,6 +55,8 @@ pub struct RunState {
     pub project: String,
     /// 侧栏展示用（截断）
     pub prompt: String,
+    /// SAGE 内部 prompt 的结构化元数据；供前端展示 executor/节点，不回显内部正文。
+    pub sage: Option<crate::types::SagePromptMeta>,
     /// 本轮完整 prompt：重连时回显，补上 CLI 尚未落盘的那条用户消息
     prompt_full: String,
     pub session_id: Mutex<Option<String>>,
@@ -127,6 +129,47 @@ fn new_run_id() -> String {
         .map(|d| d.as_millis())
         .unwrap_or(0);
     format!("run-{ms}-{}", SEQ.fetch_add(1, Ordering::Relaxed))
+}
+
+async fn terminate_child_tree(child: &mut tokio::process::Child) {
+    #[cfg(windows)]
+    if let Some(pid) = child.id() {
+        let pid = pid.to_string();
+        let mut killer = Command::new("taskkill.exe");
+        killer
+            .args(["/PID", &pid, "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let _ = tokio::time::timeout(Duration::from_secs(4), killer.status()).await;
+    }
+    let _ = child.start_kill();
+}
+
+fn visible_run_prompt(prompt: &str) -> Option<String> {
+    if crate::history::claude::sage_prompt_metadata(prompt)
+        .is_some_and(|meta| meta.kind == "summary")
+    {
+        return None;
+    }
+    if let Some(original) = crate::history::claude::sage_original_task(prompt) {
+        return Some(original);
+    }
+    let prompt = prompt.trim();
+    if crate::history::claude::injected_user_text(prompt)
+        || [
+            "【协作分工】",
+            "【协作汇总】",
+            "【协作复查回注】",
+            "【协作复查】",
+            "【协作追问】",
+        ]
+        .iter()
+        .any(|prefix| prompt.starts_with(prefix))
+    {
+        return None;
+    }
+    (!prompt.is_empty()).then(|| prompt.to_string())
 }
 
 /// 订阅运行事件流。`announce` 为 Some 时首行发 {"t":"run","run_id"}；
@@ -257,11 +300,15 @@ pub async fn stream_chat(registry: &RunRegistry, req: ChatReq) -> Response {
     drop(tx);
 
     let run_id = new_run_id();
+    // 子 agent 旁路跟随的时间基线：只认本次运行之后写入的子会话文件
+    let run_started = std::time::SystemTime::now() - std::time::Duration::from_secs(5);
+    let visible_prompt = visible_run_prompt(&req.prompt).unwrap_or_default();
     let rs = Arc::new(RunState {
         agent: req.agent.clone(),
         project: req.project.clone(),
-        prompt: req.prompt.chars().take(80).collect(),
-        prompt_full: req.prompt.clone(),
+        prompt: visible_prompt.chars().take(80).collect(),
+        sage: crate::history::claude::sage_prompt_metadata(&req.prompt),
+        prompt_full: visible_prompt,
         session_id: Mutex::new(req.session_id.clone()),
         events: Mutex::new(Vec::new()),
         notify: Notify::new(),
@@ -287,7 +334,8 @@ pub async fn stream_chat(registry: &RunRegistry, req: ChatReq) -> Response {
             tokio::select! {
                 _ = pump.kill.notified(), if !killed => {
                     killed = true;
-                    let _ = child.start_kill(); // 管道随后 EOF，循环自然收尾
+                    terminate_child_tree(&mut child).await;
+                    break; // 不再等待可能被后代继承而无法 EOF 的 stdout/stderr 管道
                 }
                 line = rx.recv() => match line {
                     Some(Line::Out(l)) => {
@@ -304,6 +352,8 @@ pub async fn stream_chat(registry: &RunRegistry, req: ChatReq) -> Response {
                         if !tailer_spawned && agent == "codex" && st.session_id.is_some() {
                             tailer_spawned = true;
                             tokio::spawn(codex_usage_tailer(pump.clone()));
+                            // 子 agent 旁路：只认本次运行开始后写入的子会话文件
+                            tokio::spawn(codex_subagent_tailer(pump.clone(), run_started));
                         }
                     }
                     Some(Line::Err(l)) => {
@@ -317,7 +367,16 @@ pub async fn stream_chat(registry: &RunRegistry, req: ChatReq) -> Response {
                 },
             }
         }
-        let exit_ok = child.wait().await.map(|s| s.success()).unwrap_or(false);
+        let exit_ok = if killed {
+            tokio::time::timeout(Duration::from_secs(5), child.wait())
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .map(|status| status.success())
+                .unwrap_or(false)
+        } else {
+            child.wait().await.map(|status| status.success()).unwrap_or(false)
+        };
         // codex 短任务可能在 tailer 首次唤醒前就结束 → done 前同步补读最终用量
         if agent == "codex" {
             if let Some(sid) = st.session_id.clone() {
@@ -367,6 +426,54 @@ pub async fn stream_chat(registry: &RunRegistry, req: ChatReq) -> Response {
 /// 而回放文件在整个回合期间持续写 token_count（含 last_token_usage 上下文与
 /// model_context_window）。运行期间每 2 秒读一次文件尾部，把最新一条转成
 /// scope=session 的 usage 事件推给订阅方，run 结束自动退出。
+/// codex 子 agent 旁路跟随：子 agent 跑在独立会话文件里，主流的 --json 不含
+/// 它的过程（连 spawn_agent 调用都不出现），只能轮询文件。首次发现某个子会话时
+/// 合成一张工具卡片，之后把新增内容以 sub_* 事件挂进去。
+async fn codex_subagent_tailer(rs: Arc<RunState>, started: std::time::SystemTime) {
+    // 子会话 id → 已读行数
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let done = rs.is_done();
+        let Some(sid) = rs.session_id.lock().unwrap().clone() else {
+            if done {
+                return;
+            }
+            continue;
+        };
+        let children =
+            tokio::task::spawn_blocking(move || crate::history::codex::child_sessions(&sid, started))
+                .await
+                .unwrap_or_default();
+        for (cid, path, label) in children {
+            let skip = seen.get(&cid).copied().unwrap_or(0);
+            if skip == 0 {
+                // 首次发现：先出卡片，后续内容挂在它下面
+                rs.push(&json!({
+                    "t": "tool_use", "name": "spawn_agent", "id": cid, "text": label,
+                }));
+            }
+            let p = path.clone();
+            let (blocks, total) =
+                tokio::task::spawn_blocking(move || crate::history::codex::subagent_tail(&p, skip))
+                    .await
+                    .unwrap_or_default();
+            for b in blocks {
+                rs.push(&json!({
+                    "t": if b.kind == "sub_tool" { "sub_tool" } else { "sub_text" },
+                    "sub": cid,
+                    "name": b.name,
+                    "text": b.text,
+                }));
+            }
+            seen.insert(cid, total);
+        }
+        if done {
+            return; // 收尾再补读一轮后退出
+        }
+    }
+}
+
 async fn codex_usage_tailer(rs: Arc<RunState>) {
     let mut path: Option<std::path::PathBuf> = None;
     let mut last_sig = String::new();
@@ -485,19 +592,14 @@ fn push_codex_images(args: &mut Vec<String>, req: &ChatReq) {
     }
 }
 
-/// codex 快速档：service_tier（TUI 的 /fast 持久化的同一官方配置键；
-/// on→fast / off→standard，显式两态覆盖全局默认，让界面开关所见即所得）。
+/// Codex 所有模型固定使用官方请求级 Fast 模式；即使旧客户端传 false/None，
+/// 也统一注入 service_tier="fast"，保证新建、续聊、fork 与 review 路径一致。
 fn push_service_tier(args: &mut Vec<String>, req: &ChatReq) {
     if req.agent != "codex" {
         return;
     }
-    if let Some(f) = req.fast {
-        args.push("-c".to_string());
-        args.push(format!(
-            "service_tier=\"{}\"",
-            if f { "fast" } else { "standard" }
-        ));
-    }
+    args.push("-c".to_string());
+    args.push("service_tier=\"fast\"".to_string());
 }
 
 /// 按 agent 与新建/resume 组装 argv（CONTRACT §3.2；prompt 一律走 stdin，不进 argv）。
@@ -996,7 +1098,7 @@ fn codex_map_line(line: &str, st: &mut MapState) -> Vec<Value> {
             .or_else(|| ev.pointer("/error/message").and_then(Value::as_str))
             .or_else(|| ev.get("error").and_then(Value::as_str))
             .unwrap_or("CLI 报告错误");
-        if st.error.is_none() {
+        if st.error.is_none() && !codex_benign_error(msg) {
             st.error = Some(truncate_chars(msg, SUMMARY_MAX));
         }
         return out;
@@ -1130,12 +1232,10 @@ fn codex_map_item(item: &Value, st: &mut MapState) -> Vec<Value> {
                 .get("message")
                 .and_then(Value::as_str)
                 .unwrap_or("CLI 报告错误");
-            // codex 把「配置项不适用、已自动省略」类告警也走 error 事件
-            //（如 service_tier=standard 对仅声明 fast 的模型），任务本身
+            // codex 把「配置项不适用、已自动省略」类告警也走 error 事件，任务本身
             // 照常执行——这类不算失败。
             // 记忆开关注入的 hooks 信任豁免同理：每次运行必报，纯提示。
-            let benign = msg.contains("will be omitted")
-                || msg.contains("dangerously-bypass-hook-trust");
+            let benign = codex_benign_error(msg);
             if st.error.is_none() && !benign {
                 st.error = Some(truncate_chars(msg, SUMMARY_MAX));
             }
@@ -1143,6 +1243,12 @@ fn codex_map_item(item: &Value, st: &mut MapState) -> Vec<Value> {
         _ => {}
     }
     out
+}
+
+fn codex_benign_error(message: &str) -> bool {
+    message.contains("will be omitted")
+        || message.contains("dangerously-bypass-hook-trust")
+        || message.contains("Skill descriptions were shortened to fit the skills context budget")
 }
 
 /// 统一 usage 事件：兼容 claude（cache_read/creation_input_tokens）与
@@ -1467,6 +1573,65 @@ fn ndjson_response(body: Body) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_always_uses_fast_service_tier() {
+        for fast in [None, Some(false), Some(true)] {
+            let req = ChatReq {
+                agent: "codex".to_string(),
+                project: ".".to_string(),
+                prompt: "test".to_string(),
+                session_id: None,
+                model: Some("gpt-5.6-sol".to_string()),
+                permission: Some("default".to_string()),
+                fast,
+                memory: Some(false),
+                effort: Some("xhigh".to_string()),
+            };
+            let (args, _) = build_args(&req);
+            assert!(
+                args.windows(2).any(|pair| {
+                    pair[0] == "-c" && pair[1] == "service_tier=\"fast\""
+                }),
+                "Codex fast={fast:?} 时仍须强制 Fast：{args:?}"
+            );
+            assert!(!args.iter().any(|arg| arg.contains("service_tier=\"standard\"")));
+        }
+    }
+
+    #[test]
+    fn internal_prompts_echo_only_the_original_user_task() {
+        let prompt = "【SAGE COLLABORATE · coding】\n任务所有者：Claude\n当前执行者：Codex\n\n原始任务：\nCMS也要加上啊\n\n请完成本节点并给出可供下游节点直接使用的明确产出。";
+        assert_eq!(visible_run_prompt(prompt).as_deref(), Some("CMS也要加上啊"));
+        assert_eq!(visible_run_prompt("【协作汇总】内部回注"), None);
+        let summary = "【SAGE COLLABORATE · 所有者汇总】\n任务所有者：Claude\n\n原始任务：\nCMS也要加上啊\n\n节点产出：\n...";
+        assert_eq!(visible_run_prompt(summary), None);
+        assert_eq!(visible_run_prompt("真正的用户输入").as_deref(), Some("真正的用户输入"));
+    }
+
+    #[test]
+    fn codex_skill_budget_notice_is_not_a_run_failure() {
+        let line = r#"{"type":"error","message":"Skill descriptions were shortened to fit the skills context budget. Codex can still see every skill."}"#;
+        let mut st = MapState::default();
+        codex_map_line(line, &mut st);
+        assert!(st.error.is_none());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn terminate_child_tree_stops_descendant_process() {
+        let mut child = Command::new("cmd.exe")
+            .args(["/D", "/S", "/C", "ping -t 127.0.0.1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("应启动测试进程树");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        terminate_child_tree(&mut child).await;
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await;
+        assert!(status.is_ok(), "停止后子进程必须在 5 秒内退出");
+    }
 
     /// 子代理行（parent_tool_use_id 非 null）：不进主流，转为带父 id 的 sub_* 事件。
     #[test]

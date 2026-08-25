@@ -38,12 +38,20 @@ fn find_python() -> Option<String> {
     None
 }
 
-pub async fn route(prompt: &str, incumbent: &str, failed: &[String]) -> Result<Value, String> {
+pub async fn route(
+    prompt: &str,
+    incumbent: &str,
+    failed: &[String],
+    state: Value,
+    constraints: Value,
+) -> Result<Value, String> {
     call(json!({
         "cmd": "route",
         "prompt": prompt,
         "incumbent": incumbent,
         "failed": failed,
+        "state": state,
+        "constraints": constraints,
     }))
     .await
 }
@@ -80,6 +88,8 @@ async fn call(payload: Value) -> Result<Value, String> {
 
     let mut child = Command::new(&py)
         .arg(dir.join("sage_bridge.py"))
+        .env("PYTHONIOENCODING", "utf-8")
+        .env("PYTHONUTF8", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

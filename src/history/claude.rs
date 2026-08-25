@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
-use crate::types::{Block, ChatMessage, SessionSummary, Transcript};
+use crate::types::{Block, ChatMessage, SagePromptMeta, SessionSummary, Transcript};
 
 /// 标题最大字符数（非字节）。
 pub(crate) const TITLE_MAX: usize = 80;
@@ -64,6 +64,130 @@ pub(crate) fn clean_title(s: &str) -> String {
         })
         .collect();
     truncate_chars(t.trim(), TITLE_MAX)
+}
+
+/// SAGE 会把内部编排说明作为 CLI 的 user prompt 写入原生历史。
+/// 历史/UI 只能暴露真实原始任务，不能把 HANDOFF/COLLABORATE 指令冒充用户输入。
+pub(crate) fn sage_original_task(text: &str) -> Option<String> {
+    let text = text.trim();
+    let original = if text.starts_with("【SAGE HANDOFF】") {
+        text.split_once("\n\n")?.1
+    } else if text.starts_with("【SAGE COLLABORATE") {
+        let (_, rest) = text.split_once("原始任务：")?;
+        let rest = rest.trim_start_matches(['\r', '\n']);
+        let end = [
+            "\n\n依赖节点产出：",
+            "\n\n节点产出：",
+            "\n\n请完成本节点",
+        ]
+        .iter()
+        .filter_map(|marker| rest.find(marker))
+        .min()
+        .unwrap_or(rest.len());
+        &rest[..end]
+    } else {
+        return None;
+    };
+    let original = original.trim();
+    (!original.is_empty()).then(|| original.to_string())
+}
+
+pub(crate) fn sage_prompt_metadata(text: &str) -> Option<SagePromptMeta> {
+    let text = text.trim();
+    let (kind, requirement) = if text.starts_with("【SAGE HANDOFF】") {
+        ("handoff", None)
+    } else if let Some(header) = text.lines().next().and_then(|line| {
+        line.strip_prefix("【SAGE COLLABORATE · ")
+            .and_then(|value| value.strip_suffix('】'))
+    }) {
+        if header == "所有者汇总" {
+            ("summary", None)
+        } else {
+            ("collaborate", Some(header.to_string()))
+        }
+    } else {
+        return None;
+    };
+    let field = |prefix: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(prefix))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(String::from)
+    };
+    let source = field("来源会话：").or_else(|| field("主会话："));
+    let (source_agent, source_session_id) = source
+        .as_deref()
+        .and_then(|value| value.split_once(':'))
+        .map(|(agent, session_id)| {
+            (
+                (!agent.trim().is_empty()).then(|| agent.trim().to_string()),
+                (!session_id.trim().is_empty()).then(|| session_id.trim().to_string()),
+            )
+        })
+        .unwrap_or((None, None));
+    Some(SagePromptMeta {
+        kind: kind.to_string(),
+        workflow_id: field("协作标识："),
+        requirement,
+        owner: field("任务所有者："),
+        executor: field("当前执行者："),
+        source_agent,
+        source_session_id,
+        original_task: sage_original_task(text),
+    })
+}
+
+fn first_content_text(content: &Value) -> Option<&str> {
+    match content {
+        Value::String(value) => Some(value),
+        Value::Array(items) => items.iter().find_map(|item| {
+            (item.get("type").and_then(Value::as_str) == Some("text"))
+                .then(|| item.get("text").and_then(Value::as_str))
+                .flatten()
+        }),
+        _ => None,
+    }
+}
+
+fn push_sage_meta(items: &mut Vec<SagePromptMeta>, text: &str) {
+    if let Some(meta) = sage_prompt_metadata(text) {
+        if !items.contains(&meta) {
+            items.push(meta);
+        }
+    }
+}
+
+/// CLI/宿主以 user role 写入的系统上下文、通知和压缩续接摘要，不是用户输入。
+pub(crate) fn injected_user_text(text: &str) -> bool {
+    let text = text.trim_start();
+    if text.starts_with('<')
+        || text.starts_with("==")
+        || text.starts_with("# AGENTS.md")
+        || text.starts_with(
+            "This session is being continued from a previous conversation that ran out of context.",
+        )
+    {
+        return true;
+    }
+    let head: String = text.chars().take(600).collect();
+    head.contains("<INSTRUCTIONS>")
+        || head.contains("<user_instructions>")
+        || head.contains("<workspace_roots>")
+        || head.contains("<permission_profile")
+        || text.contains("<environment_context>")
+}
+
+fn user_title_source(text: &str) -> String {
+    let Some(original) = sage_original_task(text) else {
+        return text.to_string();
+    };
+    original
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("请查看图片文件:"))
+        .unwrap_or(original.trim())
+        .to_string()
 }
 
 /// Howard Hinnant civil_from_days：epoch 日数 → (年, 月, 日)。已用真实样本自测。
@@ -202,7 +326,9 @@ fn history_title(session_id: &str) -> Option<String> {
         cache.titles = load_history_titles(&path);
         cache.mtime = mtime;
     }
-    cache.titles.get(session_id).map(|(_, d)| clean_title(d))
+    cache.titles.get(session_id).and_then(|(_, display)| {
+        (!injected_user_text(display)).then(|| clean_title(&user_title_source(display)))
+    })
 }
 
 // ---- 项目目录 → 真实 cwd 缓存（仅缓存解析成功的目录） ----
@@ -255,9 +381,13 @@ fn dir_real_cwd(dir: &Path) -> Option<String> {
 
 /// 扫描会话文件前若干行：created（第一个顶层 timestamp）与 fallback 标题
 /// （第一条 type==user && !isSidechain && !isMeta 的文本）。
-fn scan_session_file(path: &Path, need_title: bool) -> (Option<String>, Option<String>) {
+fn scan_session_file(
+    path: &Path,
+    need_title: bool,
+) -> (Option<String>, Option<String>, Option<SagePromptMeta>) {
     let mut created: Option<String> = None;
     let mut title: Option<String> = None;
+    let mut sage: Option<SagePromptMeta> = None;
     let mut n = 0;
     for_each_line(path, |line| {
         n += 1;
@@ -276,11 +406,20 @@ fn scan_session_file(path: &Path, need_title: bool) -> (Option<String>, Option<S
                     title = Some(clean_title(&text));
                 }
             }
+            if sage.is_none() && is_transcript_line(&v, "user") {
+                if let Some(text) = v
+                    .get("message")
+                    .and_then(|message| message.get("content"))
+                    .and_then(first_content_text)
+                {
+                    sage = sage_prompt_metadata(text);
+                }
+            }
         }
-        let done = created.is_some() && (!need_title || title.is_some());
-        !done && n < 200
+        let basics = created.is_some() && (!need_title || title.is_some());
+        !(basics && (sage.is_some() || n >= 30)) && n < 200
     });
-    (created, title)
+    (created, title, sage)
 }
 
 /// envelope 过滤：type 匹配且非 sidechain / meta。
@@ -294,8 +433,8 @@ fn is_transcript_line(v: &Value, want: &str) -> bool {
 fn first_user_text(content: &Value) -> Option<String> {
     match content {
         Value::String(s) => {
-            if !s.trim().is_empty() && !is_command_text(s) {
-                Some(s.clone())
+            if !s.trim().is_empty() && !is_command_text(s) && !injected_user_text(s) {
+                Some(user_title_source(s))
             } else {
                 None
             }
@@ -303,8 +442,8 @@ fn first_user_text(content: &Value) -> Option<String> {
         Value::Array(items) => items.iter().find_map(|item| {
             if item.get("type").and_then(Value::as_str) == Some("text") {
                 let t = item.get("text").and_then(Value::as_str).unwrap_or("");
-                if !t.trim().is_empty() && !is_command_text(t) {
-                    return Some(t.to_string());
+                if !t.trim().is_empty() && !is_command_text(t) && !injected_user_text(t) {
+                    return Some(user_title_source(t));
                 }
             }
             None
@@ -347,7 +486,7 @@ pub fn all_sessions() -> Vec<SessionSummary> {
                 continue;
             };
             let from_history = history_title(&id);
-            let (created, fallback) = scan_session_file(&path, from_history.is_none());
+            let (created, fallback, sage) = scan_session_file(&path, from_history.is_none());
             let title = from_history
                 .or(fallback)
                 .filter(|t| !t.is_empty())
@@ -360,6 +499,7 @@ pub fn all_sessions() -> Vec<SessionSummary> {
                 created,
                 updated: mtime_iso(&path),
                 archived: false,
+                sage,
             });
         }
     }
@@ -386,6 +526,7 @@ pub fn transcript(project: &str, session_id: &str) -> Result<Transcript, String>
     let mut first_ts: Option<String> = None;
     let mut last_ts: Option<String> = None;
     let mut last_model: Option<String> = None;
+    let mut sage: Vec<SagePromptMeta> = Vec::new();
     for_each_line(&path, |line| {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             return true; // 单行解析失败跳过，不中断
@@ -405,13 +546,18 @@ pub fn transcript(project: &str, session_id: &str) -> Result<Transcript, String>
         let Some(msg) = v.get("message") else {
             return true;
         };
+        if role == "user" {
+            if let Some(text) = msg.get("content").and_then(first_content_text) {
+                push_sage_meta(&mut sage, text);
+            }
+        }
         let blocks = if role == "user" {
             if fallback_title.is_none() {
                 if let Some(t) = msg.get("content").and_then(first_user_text) {
                     fallback_title = Some(clean_title(&t));
                 }
             }
-            user_blocks(msg.get("content"))
+            normalize_sage_user_blocks(&messages, user_blocks(msg.get("content")))
         } else {
             // API error 等合成行：正文是报错文本，标成错误分隔线（不映射会
             // 导致报错在重开会话后"消失"）
@@ -511,6 +657,7 @@ pub fn transcript(project: &str, session_id: &str) -> Result<Transcript, String>
         project: file_cwd.unwrap_or(normalized),
         title,
         messages,
+        sage,
         usage,
     })
 }
@@ -573,8 +720,10 @@ fn subagent_blocks(path: &Path) -> Vec<Block> {
 }
 
 /// 会话的子 agent 转录：<会话文件同名目录>/subagents/**/*.jsonl。
-/// 返回 (工作流 id, 该工作流下各子 agent 的块)；工作流 id 取文件父目录名。
-fn collect_subagents(session_path: &Path) -> Vec<(String, Vec<Block>)> {
+/// 返回 (可用于定位的键集合, 该子 agent 的块)。键有两种来源：
+/// 文件名里的 agentId（普通子 agent，主流的 tool_result 正文含它）与父目录名
+/// （workflow 子 agent，目录名即 wf id，同样出现在 tool_result 里）。
+fn collect_subagents(session_path: &Path) -> Vec<(Vec<String>, Vec<Block>)> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         let Ok(rd) = fs::read_dir(dir) else { return };
         for e in rd.flatten() {
@@ -592,14 +741,26 @@ fn collect_subagents(session_path: &Path) -> Vec<(String, Vec<Block>)> {
     files
         .into_iter()
         .filter_map(|p| {
-            let group = p
-                .parent()
-                .and_then(|d| d.file_name())
+            let mut keys: Vec<String> = Vec::new();
+            // agent-<agentId>.jsonl → agentId
+            if let Some(id) = p
+                .file_stem()
                 .and_then(|n| n.to_str())
-                .unwrap_or_default()
-                .to_string();
+                .and_then(|n| n.strip_prefix("agent-"))
+            {
+                keys.push(id.to_string());
+            }
+            // 父目录名（workflow 的 wf id）；直接挂在 subagents/ 下的不算
+            if let Some(d) = p.parent().and_then(|d| d.file_name()).and_then(|n| n.to_str()) {
+                if d != "subagents" {
+                    keys.push(d.to_string());
+                }
+            }
+            if keys.is_empty() {
+                return None;
+            }
             let blocks = subagent_blocks(&p);
-            (!blocks.is_empty()).then_some((group, blocks))
+            (!blocks.is_empty()).then_some((keys, blocks))
         })
         .collect()
 }
@@ -612,7 +773,7 @@ fn attach_subagents(session_path: &Path, messages: &mut [ChatMessage]) -> usize 
     if groups.is_empty() {
         return 0;
     }
-    // 工作流 id → 主流中最近一次 tool_use 的 (消息下标, 块下标)
+    // 定位键 → 主流中最近一次 tool_use 的 (消息下标, 块下标)
     let mut anchor: HashMap<String, (usize, usize)> = HashMap::new();
     let mut last_tool: Option<(usize, usize)> = None;
     for (mi, m) in messages.iter().enumerate() {
@@ -620,10 +781,12 @@ fn attach_subagents(session_path: &Path, messages: &mut [ChatMessage]) -> usize 
             if b.kind == "tool_use" {
                 last_tool = Some((mi, bi));
             } else if b.kind == "tool_result" {
-                for (g, _) in &groups {
-                    if !anchor.contains_key(g) && b.text.contains(g.as_str()) {
-                        if let Some(pos) = last_tool {
-                            anchor.insert(g.clone(), pos);
+                for (keys, _) in &groups {
+                    for g in keys {
+                        if !anchor.contains_key(g) && b.text.contains(g.as_str()) {
+                            if let Some(pos) = last_tool {
+                                anchor.insert(g.clone(), pos);
+                            }
                         }
                     }
                 }
@@ -633,7 +796,11 @@ fn attach_subagents(session_path: &Path, messages: &mut [ChatMessage]) -> usize 
     // 同一锚点可能对应多个子 agent：按块下标倒序插入，避免下标漂移
     let mut pending: Vec<(usize, usize, Vec<Block>)> = groups
         .into_iter()
-        .filter_map(|(g, blocks)| anchor.get(&g).map(|&(mi, bi)| (mi, bi, blocks)))
+        .filter_map(|(keys, blocks)| {
+            keys.iter()
+                .find_map(|g| anchor.get(g))
+                .map(|&(mi, bi)| (mi, bi, blocks))
+        })
         .collect();
     pending.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
     let n = pending.len();
@@ -714,7 +881,7 @@ fn user_blocks(content: Option<&Value>) -> Vec<Block> {
     let mut blocks = Vec::new();
     match content {
         Some(Value::String(s)) => {
-            if !s.trim().is_empty() && !is_command_text(s) {
+            if !s.trim().is_empty() && !is_command_text(s) && !injected_user_text(s) {
                 blocks.push(text_block(s.clone()));
             }
         }
@@ -723,7 +890,10 @@ fn user_blocks(content: Option<&Value>) -> Vec<Block> {
                 match item.get("type").and_then(Value::as_str) {
                     Some("text") => {
                         let t = item.get("text").and_then(Value::as_str).unwrap_or("");
-                        if !t.trim().is_empty() && !is_command_text(t) {
+                        if !t.trim().is_empty()
+                            && !is_command_text(t)
+                            && !injected_user_text(t)
+                        {
                             blocks.push(text_block(t.to_string()));
                         }
                     }
@@ -877,4 +1047,113 @@ fn assistant_blocks(content: Option<&Value>) -> Vec<Block> {
         _ => {}
     }
     blocks
+}
+
+fn normalize_sage_user_blocks(messages: &[ChatMessage], mut blocks: Vec<Block>) -> Vec<Block> {
+    let Some(original) = blocks
+        .iter()
+        .filter(|block| block.kind == "text")
+        .find_map(|block| sage_original_task(&block.text))
+    else {
+        return blocks;
+    };
+    let already_visible = messages.iter().any(|message| {
+        message.role == "user"
+            && message
+                .blocks
+                .iter()
+                .any(|block| block.kind == "text" && block.text.trim() == original)
+    });
+    if already_visible {
+        return Vec::new();
+    }
+    let mut replaced = false;
+    blocks.retain_mut(|block| {
+        if block.kind != "text" || sage_original_task(&block.text).is_none() {
+            return true;
+        }
+        if replaced {
+            return false;
+        }
+        block.text = original.clone();
+        replaced = true;
+        true
+    });
+    blocks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    const ORIGINAL: &str = "检查这个活动玩法，时间是不是有问题";
+
+    fn handoff_prompt() -> String {
+        format!(
+            "【SAGE HANDOFF】路由判定你接管本任务的完整所有权。请独立完成并给出最终结果。\n协作标识：sage-handoff-1\n来源会话：claude:origin-session\n当前执行者：Codex · gpt-5.6-sol\n\n{ORIGINAL}\n\n请查看图片文件: C:\\temp\\shot.png"
+        )
+    }
+
+    fn collaborate_prompt(node: &str) -> String {
+        format!(
+            "【SAGE COLLABORATE · {node}】\n协作标识：sage-flow-1\n主会话：codex:owner-session\n任务所有者：Codex\n当前执行者：Claude\n完整分工：analysis → Claude\n\n原始任务：\n{ORIGINAL}\n\n请完成本节点并给出可供下游节点直接使用的明确产出。"
+        )
+    }
+
+    #[test]
+    fn sage_prompts_expose_only_the_original_task() {
+        let handoff = sage_original_task(&handoff_prompt()).expect("应提取移交原始任务");
+        assert!(handoff.starts_with(ORIGINAL));
+        assert!(handoff.contains("请查看图片文件:"));
+        assert_eq!(user_title_source(&handoff_prompt()), ORIGINAL);
+        let handoff_meta = sage_prompt_metadata(&handoff_prompt()).unwrap();
+        assert_eq!(handoff_meta.workflow_id.as_deref(), Some("sage-handoff-1"));
+        assert_eq!(handoff_meta.source_agent.as_deref(), Some("claude"));
+        assert_eq!(handoff_meta.source_session_id.as_deref(), Some("origin-session"));
+        assert_eq!(handoff_meta.executor.as_deref(), Some("Codex · gpt-5.6-sol"));
+        assert_eq!(
+            sage_original_task(&collaborate_prompt("analysis")).as_deref(),
+            Some(ORIGINAL)
+        );
+        let meta = sage_prompt_metadata(&collaborate_prompt("analysis")).unwrap();
+        assert_eq!(meta.kind, "collaborate");
+        assert_eq!(meta.workflow_id.as_deref(), Some("sage-flow-1"));
+        assert_eq!(meta.requirement.as_deref(), Some("analysis"));
+        assert_eq!(meta.owner.as_deref(), Some("Codex"));
+        assert_eq!(meta.executor.as_deref(), Some("Claude"));
+        assert_eq!(meta.source_agent.as_deref(), Some("codex"));
+        assert_eq!(meta.source_session_id.as_deref(), Some("owner-session"));
+        assert_eq!(meta.original_task.as_deref(), Some(ORIGINAL));
+
+        let first = normalize_sage_user_blocks(
+            &[],
+            user_blocks(Some(&json!(collaborate_prompt("analysis")))),
+        );
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].text, ORIGINAL);
+
+        let existing = vec![ChatMessage {
+            role: "user".to_string(),
+            ts: None,
+            blocks: first,
+            pos: None,
+        }];
+        let duplicate = normalize_sage_user_blocks(
+            &existing,
+            user_blocks(Some(&json!(collaborate_prompt("review")))),
+        );
+        assert!(duplicate.is_empty());
+    }
+
+    #[test]
+    fn system_injected_user_messages_are_hidden() {
+        let notification = "<task-notification>\n<status>completed</status>\n</task-notification>";
+        let continuation = "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\nThe user (via a 【SAGE HANDOFF】 prompt) requested work.";
+
+        assert!(injected_user_text(notification));
+        assert!(injected_user_text(continuation));
+        assert!(user_blocks(Some(&json!(notification))).is_empty());
+        assert!(user_blocks(Some(&json!(continuation))).is_empty());
+    }
 }

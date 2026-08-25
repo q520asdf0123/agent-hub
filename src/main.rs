@@ -5,6 +5,7 @@ mod api;
 mod cli;
 mod config;
 mod dialog;
+mod editors;
 mod history;
 mod models;
 mod run;
@@ -24,10 +25,13 @@ async fn main() {
     tokio::spawn(api::warm_sessions());
     let app = Router::new()
         .route("/", get(api::index_html))
+        .route("/sage-scheduler.js", get(api::sage_scheduler_js))
         .route("/app.js", get(api::app_js))
         .route("/style.css", get(api::style_css))
         .route("/favicon.svg", get(api::favicon_svg))
         .route("/api/status", get(api::status))
+        .route("/api/instance", get(api::instance))
+        .route("/api/editors", get(api::editors))
         .route("/api/projects", get(api::projects).post(api::add_project))
         .route("/api/projects/discover", get(api::discover_projects))
         .route("/api/pick-folder", post(api::pick_folder))

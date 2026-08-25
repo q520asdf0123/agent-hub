@@ -80,9 +80,10 @@
               <button id="skill-btn" class="chip" type="button" title="插入技能 / 命令（输入框开头键入 / 也可触发）">／技能</button>
               <button id="attach-btn" class="chip" type="button" title="添加图片（也可直接粘贴截图）">📎 图片</button>
               <input id="file-input" type="file" accept="image/*" multiple hidden>
-              <button id="fast-btn" class="chip" type="button" title="快速模式：以 fastMode 设置运行（需模型支持）">⚡ 快速</button>
-              <button id="sage-btn" class="chip" type="button" title="SAGE 智能路由：按任务需求自动在 Claude Code / Codex 间选择执行者（sprix-sage-router）">🧭 智能路由</button>
+              <button id="fast-btn" class="chip" type="button" title="快速模式：Claude 可手动切换；Codex 所有模型固定开启">⚡ 快速</button>
+              <button id="sage-btn" class="chip" type="button" title="SAGE 智能路由：按任务复杂度自动选择团队人数、CLI、模型、思考强度与需求分工；与团队模式互斥（sprix-sage-router）">🧭 智能路由</button>
               <button id="mem-btn" class="chip" type="button" title="记忆：本次任务经 OpenViking 自动召回项目记忆、结束后沉淀长期记忆（本地服务 127.0.0.1:1933）">🧠 记忆</button>
+              <button id="team-btn" class="chip" type="button" title="团队模式：让 agent 派生多个子 agent 分工协作；与智能路由互斥（开启后继续点击可调队员数）">👥 团队</button>
             </div>
             <div class="composer-right">
               <button id="perm-btn" class="chip chip-perm" type="button" title="权限模式"></button>
@@ -134,6 +135,7 @@
   </main>
 </div>
 
+<script src="/sage-scheduler.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

@@ -13,8 +13,10 @@
 - **双 CLI 检测与流式对话**：自动探测本机 `claude` / `codex` 安装（解析 npm shim 背后的真实 `.exe`），以无头模式驱动，NDJSON 流式渲染文本 / 思考 / 工具调用
 - **历史会话浏览与续聊**：直接读取两家 CLI 的原生存储（`~/.claude/projects/`、`~/.codex/sessions/`），可查看任意历史转录并 `resume` 继续对话；与终端里的会话完全互通
 - **多项目管理**：从历史自动发现项目，自选导入侧栏；按 agent 过滤（全部 / Claude / Codex）
-- **后台任务**：刷新、关页面不中断运行中的任务，重开自动重连续看输出；只有停止按钮才会终止；侧栏实时显示 运行中 ● / 完成 ✓ / 出错 ✕
-- **SAGE 智能路由**：集成 [sprix-sage-router](https://github.com/wang2122/sprix-sage-router)，按任务需求自动在两个 CLI 间选择执行者，决策卡展示理由
+- **后台任务**：刷新、关页面不中断运行中的任务，重开自动重连续看输出；停止按钮会终止完整 SAGE workflow 进程树并确认结果；侧栏实时显示 运行中 ● / 完成 ✓ / 已停止 ■ / 出错 ✕
+- **部署感知页面**：已打开标签页会检测本地后端实例变化，保留当前会话和草稿后自动加载新版前端，不再继续运行旧 JavaScript
+- **SAGE 智能路由**：从本机发现的 `CLI + 模型` 候选池中，按任务复杂度自动决定团队人数、模型和每个需求节点的思考强度；遵循官方 `SELF / COLLABORATE / HANDOFF`、assignments 与需求 DAG 执行，同一 executor 串行、不同 executor 的无依赖节点并行，按 executor / effort / 需求回喂学习；GPT-5.6 Sol 的自动思考强度最高为 `xhigh`，Luna/mini/Spark 等低成本模型在支持时最高可到 `max`
+- **Codex 强制 Fast**：所有 Codex 模型调用都使用请求级 `service_tier="fast"`；界面固定显示开启且不可关闭
 - **技能 / 命令面板**：输入 `/` 唤起，聚合 Claude 技能（用户 / 项目 / 插件）、Codex 技能与自定义 prompt、内置命令（`/review`、`/init`、`/diff`、`/status`、`/fork`…），支持键盘导航，不同技能自动配色
 - **图片全链路**：输入框粘贴截图发给 CLI，历史图片内联展示，点击灯箱缩放
 - **已编辑文件卡片**：每轮任务汇总改动文件（默认折叠），点击进入 GitHub 风格差异审查（行号 / 整行着色 / 支持嵌套 git 仓库与已提交改动回溯），右键可在 VS Code / 资源管理器中打开
@@ -79,6 +81,10 @@ src/
 ├─ skills.rs      # 技能 / 命令扫描
 └─ sage.rs        # SAGE 路由桥接（Python 子进程）
 static/           # 前端（原生 JS，编译期内嵌进二进制）
+├─ index.html
+├─ app.js
+├─ sage-scheduler.js      # SAGE requirement DAG 波次调度器（可单测）
+└─ style.css
 vendor/sprix-sage-router/   # SAGE 算法库（MIT，含 LICENSE）
 docs/             # 技术方案（PLAN.md）与模块契约（CONTRACT.md）
 ```
@@ -88,6 +94,7 @@ docs/             # 技术方案（PLAN.md）与模块契约（CONTRACT.md）
 - `~/.agenthub/config.json`：已导入的项目列表（界面操作自动维护）
 - 技能来源：`~/.claude/skills/`、项目 `.claude/skills/`、已安装插件、`~/.codex/skills/`、`~/.codex/prompts/`
 - SAGE 能力画像：`vendor/sprix-sage-router/sage_bridge.py` 的 `DEFAULT_PROFILES`，可按偏好调整
+- SAGE 学习状态：`~/.agenthub/sage_state.json`；执行语义或模型池 schema 升级时旧状态自动备份后迁移
 
 ## 安全说明
 

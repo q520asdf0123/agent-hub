@@ -47,6 +47,9 @@ pub struct SessionSummary {
     pub updated: Option<String>,
     /// codex archived_sessions
     pub archived: bool,
+    /// 会话首个 SAGE 路由摘要；列表层用于恢复父子谱系，不展示内部 prompt。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sage: Option<SagePromptMeta>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -56,8 +59,31 @@ pub struct Transcript {
     pub project: String,
     pub title: String,
     pub messages: Vec<ChatMessage>,
+    /// 原生 CLI 历史中的 SAGE 内部 prompt 元数据；前端用于恢复协作关系，不直接渲染。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sage: Vec<SagePromptMeta>,
     /// 整场用量汇总（input/output/cache_read/cache_write/context/window/first_ts/last_ts/model）
     pub usage: Option<serde_json::Value>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct SagePromptMeta {
+    /// handoff | collaborate | summary
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workflow_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requirement: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub executor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_agent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub original_task: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug, Default)]
@@ -92,8 +118,8 @@ pub struct ChatReq {
     pub model: Option<String>,
     /// "bypass" | "accept-edits" | "plan" | "read-only" | "default"
     pub permission: Option<String>,
-    /// 快速模式：claude 注入 --settings {"fastMode":true}；
-    /// codex 传 -c service_tier="fast"/"standard"（None 则不传，随全局默认）
+    /// 快速模式：claude 按 true 注入 --settings {"fastMode":true}；
+    /// codex 服务端无条件注入 -c service_tier="fast"，本字段值不影响 Codex。
     pub fast: Option<bool>,
     /// 记忆：本次运行启用 OpenViking 记忆插件（进程环境变量按次开关；
     /// codex 另加 hooks 信任豁免 flag）

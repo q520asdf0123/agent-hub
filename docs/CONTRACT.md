@@ -18,9 +18,13 @@
 
 全部 API 序列化类型在 `src/types.rs`（已固定，见源码）。要点：
 
-- `SessionSummary { agent, id, title, project, created, updated, archived }` — `project` 是**真实规范化路径**（如 `D:\project\demo_app`），`updated` 用文件 mtime 转 ISO 8601 UTC 字符串。
-- `Transcript { agent, id, project, title, messages: Vec<ChatMessage> }`；`ChatMessage { role, ts, blocks }`；`Block { kind, text, name }`，`kind ∈ text|thinking|tool_use|tool_result|image|divider`。
-- `ChatReq { agent, project, prompt, session_id?, model?, permission? }`，`permission ∈ "bypass"|"accept-edits"|"plan"|"read-only"|"default"`。
+- `SessionSummary { agent, id, title, project, created, updated, archived, sage? }` — `project` 是**真实规范化路径**（如 `D:\project\demo_app`），`updated` 用文件 mtime 转 ISO 8601 UTC 字符串；`sage` 携带列表级不可见 lineage 摘要，使侧栏首次加载即可识别 child/handoff target。
+- `Transcript { agent, id, project, title, messages: Vec<ChatMessage>, sage: Vec<SagePromptMeta>, usage? }`；`ChatMessage { role, ts, blocks }`；`Block { kind, text, name }`，`kind ∈ text|thinking|tool_use|tool_result|image|divider`。`sage` 是从原生历史内部 prompt 提取的不可见 workflow/source-agent/source-session/owner/executor/requirement/original-task 元数据，只用于恢复协作或移交关系，不直接渲染。
+- `ChatReq { agent, project, prompt, session_id?, model?, permission?, fast?, memory?, effort? }`，`permission ∈ "bypass"|"accept-edits"|"plan"|"read-only"|"default"`。Claude 按 `fast=true` 注入 `fastMode`；Codex 忽略该字段的关闭值，所有模型和所有执行路径都强制注入请求级 `service_tier="fast"`。
+- `SageReq { prompt, agent?, failed?, state?, constraints? }`：`state` 映射官方 `ExecutionState`；`constraints` 映射 Task 约束，服务端以真实 CLI 探测覆盖 `available_agents` 并注入当前 load。
+- SAGE 候选 executor id 为 `runtime::model`；服务端从本机模型目录构建能力、相对成本/延迟、权限、load、Fast 状态与支持的 effort 画像。决策返回 `mode/primary/partners/agents/executors/team_size/team_limit/complexity/assignments/efforts/primary_effort/summary_effort/dependencies/topology/switch_recommended` 及审计字段。整体复杂度 effort 进入路由成本/延迟先验，每个 requirement 再选择实际 effort；GPT-5.6 Sol 的自动 effort 硬性封顶为 `xhigh`，Luna/mini/Spark 等低成本模型不设额外 `high` 上限，支持时可到 `max`；`COLLABORATE` 依 requirement DAG 分波执行，同一 executor 的节点由 `executeWave()` 严格串行，不同 executor 的无依赖节点并行，最后由 incumbent 按 summary effort 汇总。不得增加“review 必须换 agent/session”等 assignments 之外的自定义规则。
+- 后台运行表中的可见 prompt 与 CLI 实际 prompt 分离：`GET /api/runs` 返回真实用户任务及可选 SAGE metadata；`GET /api/run?id=` 的 `user_echo` 不回显 summary/回注/内部提示。Codex skill-context-budget 等通知不计为失败，SAGE 成功节点的纯 WARN stderr 不渲染。
+- `GET /api/instance` 返回进程启动级 `instance_id`。前端每 3 秒检测实例变化；部署重启时保存当前 session/未发送草稿到 sessionStorage，自动 reload 后恢复，不调用 stop、不终止后台任务。
 
 路径规范化函数（history 侧实现并导出 `pub fn normalize_path(p: &str) -> String`，放 `history/claude.rs` 或经 `mod.rs` re-export 均可，backend 可调用）：剥 `\\?\` 前缀、`/`→`\`、盘符大写、去尾部 `\`。
 
@@ -42,9 +46,9 @@ pub fn transcript(session_id: &str) -> Result<crate::types::Transcript, String>;
 ### 2.1 Claude 历史（实测格式）
 - 根：`~/.claude/projects/`，项目目录名 = 真实路径 `[^A-Za-z0-9]`→`-`（有损）。会话 = 目录**顶层** `*.jsonl`，文件名 stem 即 session uuid；忽略一切子目录（`memory/`、`<uuid>/`）。
 - 真实路径恢复：读该目录任一 jsonl 前若干行的 `cwd` 字段（user/assistant 行都有）；读不到（如只有 memory/ 的空目录）则跳过该目录。
-- 标题：`~/.claude/history.jsonl` 每行 `{"display":"...","timestamp":epoch_ms,"project":"D:\\project","sessionId":"uuid"}`，取该 sessionId 最早的、`display` 不以 `/` 开头的行；fallback：会话文件里第一条 `type=="user" && !isSidechain && !isMeta` 的文本（content 为字符串直接用；为数组取首个 `text` 块），截 80 字符。再无则 "(无标题)"。
+- 标题：`~/.claude/history.jsonl` 每行 `{"display":"...","timestamp":epoch_ms,"project":"D:\\project","sessionId":"uuid"}`，取该 sessionId 最早的、`display` 不以 `/` 开头的行；fallback：会话文件里第一条 `type=="user" && !isSidechain && !isMeta` 的文本（content 为字符串直接用；为数组取首个 `text` 块），截 80 字符。若首条是 `【SAGE HANDOFF】/【SAGE COLLABORATE】` 内部 prompt，标题只取其中原始任务的首个非空行。再无则 "(无标题)"。
 - 转录重建：逐行 JSON；只取 `type ∈ {user, assistant}` 且 `isSidechain!=true && isMeta!=true` 的行。envelope: `{type, message, uuid, parentUuid, timestamp, cwd, sessionId}`。
-  - user：`message.content` 字符串→一个 text 块；数组→`text`→text 块、`tool_result`→tool_result 块（content 字符串或嵌套数组的 text，截 400 字符）、`image`→image 块（text 填 "[图片]"）。content 以 `<command-name>`/`<local-command` 开头的行跳过（斜杠命令记录）。**整条消息只有 tool_result 块时 role 仍是 user，前端会并入上一条助手消息展示**，照常返回。
+  - user：`message.content` 字符串→一个 text 块；数组→`text`→text 块、`tool_result`→tool_result 块（content 字符串或嵌套数组的 text，截 400 字符）、`image`→image 块（text 填 "[图片]"）。content 以 `<command-name>`/`<local-command` 开头的行跳过（斜杠命令记录）；以 `<...>` 开头的系统通知、环境上下文，以及 Claude 的上下文压缩续接摘要也跳过。SAGE 内部 prompt 只提取其中原始任务，同一任务在节点/汇总中的后续副本跳过；内部字段不得作为 user 消息返回，但结构化信息写入 `transcript.sage`。**整条消息只有 tool_result 块时 role 仍是 user，前端会并入上一条助手消息展示**，照常返回。
   - assistant：`message.content` 数组：`text`→text、`thinking`→thinking（`thinking` 字段）、`tool_use`→tool_use 块（`name` 填工具名，text 填 `input` 的 JSON 序列化截 400 字符）。`message.model=="<synthetic>"` 的错误行跳过。
   - 大 JSON 行（可能 >1MB）正常 serde_json 解析即可；单行解析失败跳过该行不中断。
 - 会话枚举性能：标题需要时才读文件首行；`all_sessions()` 每次调用重扫目录可接受（文件数少），但 history.jsonl 只读一次缓存于 `OnceLock`（mtime 变了重读）。
@@ -53,10 +57,10 @@ pub fn transcript(session_id: &str) -> Result<crate::types::Transcript, String>;
 - 根：`~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl` + `~/.codex/archived_sessions/rollout-*.jsonl`（扁平，archived=true）。本机 ~2500 文件。
 - 每文件首行 `session_meta`：`{timestamp, type:"session_meta", payload:{id, timestamp, cwd, originator, cli_version, thread_source, ...}}`。`thread_source=="subagent"` 的整个文件跳过。会话 id = `payload.id`（与文件名 uuid 一致）。
 - **索引缓存**：`static INDEX: Mutex<HashMap<PathBuf, (SystemTime, IndexEntry)>>`；每次 `all_sessions()` 遍历目录 stat，新文件/变更 mtime 才重读首行。标题惰性：列表阶段可先用首行拿不到的话延迟——为简单起见，索引时顺带向后最多扫 30 行找第一条用户消息作标题（见下），存入 IndexEntry。
-- 标题 = 第一条用户输入，来源按优先级：`response_item` 且 `payload.type=="message" && payload.role=="user"` 的 `content[].text`（type `input_text`）；或 `event_msg` 且 `payload.type=="user_message"` 的 `payload.message`。跳过以 `<`、`==` 开头的系统注入文本（如 environment_context）。截 80 字符；找不到则 "(无标题)"。
+- 标题 = 第一条用户输入，来源按优先级：`response_item` 且 `payload.type=="message" && payload.role=="user"` 的 `content[].text`（type `input_text`）；或 `event_msg` 且 `payload.type=="user_message"` 的 `payload.message`。跳过以 `<`、`==` 开头的系统注入文本（如 environment_context）及上下文压缩续接摘要；SAGE 内部 prompt 改取其中原始任务首行。截 80 字符；找不到则 "(无标题)"。
 - 转录重建（防御式，逐行；行 `{timestamp, type, payload}`）：
   - `session_meta`→跳过；`turn_context`→跳过（可用其 `model` 更新元信息）。
-  - `response_item`：`payload.type=="message"`：role `user`/`assistant` 才收（`developer`/`system` 跳过；user 内容以 `<` 开头的 environment/context 注入跳过）；`content[]` 中 `input_text`/`output_text`/`text` 的 `text` 拼接为 text 块。`payload.type=="reasoning"`：`summary[]`/`content[]` 里的 text 合为 thinking 块。`function_call`/`custom_tool_call`：tool_use 块（name=`name` 字段，text=arguments 截 400）。`function_call_output`/`custom_tool_call_output`：tool_result 块（output 截 400）。其余 payload.type 跳过。
+  - `response_item`：`payload.type=="message"`：role `user`/`assistant` 才收（`developer`/`system` 跳过；user 内容中的 environment/context、系统通知和上下文压缩续接摘要跳过）；SAGE 内部 prompt 只还原一次原始任务，重复节点/汇总正文及重复图片跳过，同时去重记录 `transcript.sage`；`content[]` 中 `input_text`/`output_text`/`text` 的 `text` 拼接为 text 块。`payload.type=="reasoning"`：`summary[]`/`content[]` 里的 text 合为 thinking 块。`function_call`/`custom_tool_call`：tool_use 块（name=`name` 字段，text=arguments 截 400）。`function_call_output`/`custom_tool_call_output`：tool_result 块（output 截 400）。其余 payload.type 跳过。
   - `event_msg`：`user_message`→user text 块；`agent_message`→assistant text 块（`payload.message`）；`item_completed`→按 `item.type`（大小写不敏感 `usermessage`/`agentmessage`/`reasoning`）映射；其余跳过。**注意 response_item 与 event_msg 可能重复表达同一消息**：同 role 且文本完全相同、相邻出现时去重（保留先出现的）。
   - `compacted`→divider 块（text="上下文已压缩"，role "system"）。
 - `transcript(session_id)`：从索引反查文件路径（索引未建则先建）。
@@ -141,8 +145,8 @@ pub async fn status() -> crate::types::StatusResp;           // 结果缓存 Onc
 - 加载态骨架 / 空态文案「暂无对话」。
 
 ### 4.2 交互协议
-- 发送：`fetch('/api/chat', {method:'POST', body: JSON.stringify(ChatReq)})`，`resp.body.getReader()` 按行拆 NDJSON（注意 chunk 跨行缓冲）。事件处理：`init`→记录 session_id（新会话首次响应后把会话加入侧栏）；`delta`→向当前流式块追加（channel 区分 text/thinking）；`text`/`thinking`/`tool_use`/`tool_result`/`status` 各自建块；`done`→结束态（ok=false 显示红色错误条）；流式期间显示闪烁光标 + 「停止」按钮（AbortController.abort() 即取消）。
-- 历史打开：侧栏点会话 → `/api/session` → 渲染转录 → 底部输入框 placeholder「继续这个会话…」。连续 tool_result-only 的 user 消息并入前一条助手消息区。
+- 发送：`fetch('/api/chat', {method:'POST', body: JSON.stringify(ChatReq)})`，`resp.body.getReader()` 按行拆 NDJSON（注意 chunk 跨行缓冲）。事件处理：`init`→记录 session_id（新会话首次响应后把会话加入侧栏）；`delta`→向当前流式块追加（channel 区分 text/thinking）；`text`/`thinking`/`tool_use`/`tool_result`/`status` 各自建块；`done`→结束态。流式期间「停止」按钮先从 `/api/runs` 按 current/partner/workflow 解析全部目标，再逐个 POST `/api/stop`，随后 abort viewer 并等待运行表确认；Windows 后端以精确 PID 的 `taskkill /T /F` 终止 CLI 进程树，不依赖继承管道 EOF。UI 必须显示“正在停止→■ 已停止/失败”，停止不归类为运行错误。
+- 历史打开：侧栏点会话 → `/api/session` → 渲染转录 → 底部输入框 placeholder「继续这个会话…」。连续 tool_result-only 的 user 消息并入前一条助手消息区。会话列表先依据 `SessionSummary.sage` 建立 exact/受限 legacy links 并过滤 target，不要求用户先打开来源会话；同 session 最新非空 run prompt 覆盖临时“无标题”。协作面板再依据 `transcript.sage` 补扫缺失 links，显示当前任务子会话数、全局运行数、executor 与复用节点。现有主会话触发 HANDOFF 时，target 保留完整所有权但以“移交接管”嵌套到来源会话、从普通侧栏隐藏、提供“来源会话”入口且不自动回注。
 - **安全**：一切动态文本经 `textContent` / 自建 escapeHtml 插入，绝不 innerHTML 拼接未转义内容。助手文本做极简 markdown：``` 围栏 → `<pre><code>`，行内 `` ` `` → `<code>`，其余纯文本保留换行（white-space: pre-wrap）。
 - 无路由库：hash 记忆当前视图可选，不强制。
 

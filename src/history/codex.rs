@@ -11,9 +11,10 @@ use std::time::SystemTime;
 use serde_json::Value;
 
 use crate::history::claude::{
-    clean_title, for_each_line, normalize_path, system_time_to_iso, truncate_chars, SUMMARY_MAX,
+    clean_title, for_each_line, injected_user_text, normalize_path, sage_original_task,
+    sage_prompt_metadata, system_time_to_iso, truncate_chars, SUMMARY_MAX,
 };
-use crate::types::{Block, ChatMessage, SessionSummary, Transcript};
+use crate::types::{Block, ChatMessage, SagePromptMeta, SessionSummary, Transcript};
 
 /// 索引时向后扫描找标题的最大行数（不含首行 session_meta）。
 const TITLE_SCAN_LINES: usize = 30;
@@ -32,6 +33,7 @@ struct IndexEntry {
     /// session_meta.payload.timestamp
     created: Option<String>,
     title: String,
+    sage: Option<SagePromptMeta>,
     /// thread_source=="subagent" 或首行不可解析：整个文件跳过（缓存负结果）
     skip: bool,
 }
@@ -329,6 +331,7 @@ fn index_file(path: &Path) -> IndexEntry {
         cwd: String::new(),
         created: None,
         title: String::new(),
+        sage: None,
         skip: true,
     };
     let mut n: usize = 0;
@@ -365,8 +368,20 @@ fn index_file(path: &Path) -> IndexEntry {
             entry.skip = false;
             return true;
         }
-        if let Some(t) = title_candidate(&v) {
-            entry.title = clean_title(&t);
+        if entry.sage.is_none() {
+            if let Some(payload) = v.get("payload") {
+                if let Some(text) = record_user_prompt(v.get("type").and_then(Value::as_str), payload)
+                {
+                    entry.sage = sage_prompt_metadata(&text);
+                }
+            }
+        }
+        if entry.title.is_empty() {
+            if let Some(t) = title_candidate(&v) {
+                entry.title = clean_title(&t);
+            }
+        }
+        if !entry.title.is_empty() && (entry.sage.is_some() || n >= TITLE_SCAN_LINES) {
             return false;
         }
         n <= TITLE_SCAN_LINES
@@ -410,6 +425,8 @@ fn title_candidate(v: &Value) -> Option<String> {
 ///    "# Files mentioned by the user" 等），返回 None 让调用方扫描下一条消息；
 /// 3) 其余取首行真实文字。
 fn clean_title_text(s: &str) -> Option<String> {
+    let sage_task = sage_original_task(s);
+    let s = sage_task.as_deref().unwrap_or(s);
     if let Some(idx) = s.find("## My request:") {
         let after = &s[idx + "## My request:".len()..];
         for line in after.lines() {
@@ -538,6 +555,7 @@ pub fn all_sessions() -> Vec<SessionSummary> {
             created: e.created,
             updated: system_time_to_iso(mtime),
             archived,
+            sage: e.sage,
         })
         .collect()
 }
@@ -557,6 +575,9 @@ pub fn transcript(session_id: &str) -> Result<Transcript, String> {
     let mut first_ts: Option<String> = None;
     let mut last_ts: Option<String> = None;
     let mut fork_ref: Option<(String, Option<u64>, Option<u64>)> = None;
+    let mut spawn_calls: Vec<String> = Vec::new();
+    let mut spawned: HashMap<String, String> = HashMap::new();
+    let mut sage: Vec<SagePromptMeta> = Vec::new();
     for_each_line(&path, |line| {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             return true; // 单行解析失败跳过，不中断
@@ -571,6 +592,13 @@ pub fn transcript(session_id: &str) -> Result<Transcript, String> {
         let Some(payload) = v.get("payload") else {
             return true;
         };
+        if let Some(text) = record_user_prompt(v.get("type").and_then(Value::as_str), payload) {
+            if let Some(meta) = sage_prompt_metadata(&text) {
+                if !sage.contains(&meta) {
+                    sage.push(meta);
+                }
+            }
+        }
         // 用量：token_count 事件（新式 info.total_token_usage / 旧式扁平字段）
         if v.get("type").and_then(Value::as_str) == Some("event_msg")
             && payload.get("type").and_then(Value::as_str) == Some("token_count")
@@ -609,11 +637,37 @@ pub fn transcript(session_id: &str) -> Result<Transcript, String> {
                 }
             }
             Some("response_item") => {
+                // spawn_agent 调用按出现顺序记 call_id：与它产出的 tool_use 块同序，
+                // 据此把 sub_agent_activity 里的子会话精确对到具体那一次派生。
+                if payload.get("type").and_then(Value::as_str) == Some("function_call")
+                    && payload.get("name").and_then(Value::as_str) == Some("spawn_agent")
+                {
+                    spawn_calls.push(
+                        payload
+                            .get("call_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                    );
+                }
                 let before = messages.len();
                 handle_response_item(&mut messages, payload, ts);
                 backfill_pos(&mut messages, before, &v);
             }
             Some("event_msg") => {
+                // 子 agent 派生：记下被拉起的子会话 id，稍后按顺序挂到
+                // 对应的 spawn_agent 工具块下（kind=="interacted" 是与已有
+                // 子 agent 通信，不是新派生，跳过）。
+                if payload.get("type").and_then(Value::as_str) == Some("sub_agent_activity")
+                    && payload.get("kind").and_then(Value::as_str) == Some("started")
+                {
+                    if let (Some(call), Some(id)) = (
+                        payload.get("event_id").and_then(Value::as_str),
+                        payload.get("agent_thread_id").and_then(Value::as_str),
+                    ) {
+                        spawned.insert(call.to_string(), id.to_string());
+                    }
+                }
                 let before = messages.len();
                 handle_event_msg(&mut messages, payload, ts);
                 backfill_pos(&mut messages, before, &v);
@@ -667,14 +721,49 @@ pub fn transcript(session_id: &str) -> Result<Transcript, String> {
             "first_ts": first_ts, "last_ts": last_ts,
         })
     });
+    attach_subagents(&mut messages, &spawn_calls, &spawned);
     Ok(Transcript {
         agent: "codex".to_string(),
         id: entry.id,
         project: entry.cwd,
         title: entry.title,
         messages,
+        sage,
         usage,
     })
+}
+
+fn record_user_prompt(record_type: Option<&str>, payload: &Value) -> Option<String> {
+    match record_type {
+        Some("response_item")
+            if payload.get("type").and_then(Value::as_str) == Some("message")
+                && payload.get("role").and_then(Value::as_str) == Some("user") =>
+        {
+            Some(content_text(payload.get("content")))
+        }
+        Some("event_msg")
+            if payload.get("type").and_then(Value::as_str) == Some("user_message") =>
+        {
+            payload.get("message").and_then(Value::as_str).map(String::from)
+        }
+        Some("event_msg")
+            if payload.get("type").and_then(Value::as_str) == Some("item_completed") =>
+        {
+            let item = payload.get("item").unwrap_or(payload);
+            let kind = item
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            (kind == "usermessage").then(|| {
+                item.get("text")
+                    .and_then(Value::as_str)
+                    .map(String::from)
+                    .unwrap_or_else(|| content_text(item.get("content")))
+            })
+        }
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -688,22 +777,6 @@ fn push_block(messages: &mut Vec<ChatMessage>, role: &str, ts: Option<String>, b
         blocks: vec![block],
         pos: None,
     });
-}
-
-/// 系统注入的「用户」消息：以 < / == 开头，或前段含环境上下文 / 指令注入标签
-/// （environment_context、user_instructions 等，可能带前缀文字混排）。
-fn injected_user_text(text: &str) -> bool {
-    let t = text.trim_start();
-    if t.starts_with('<') || t.starts_with("==") || t.starts_with("# AGENTS.md") {
-        return true;
-    }
-    let head: String = t.chars().take(600).collect();
-    head.contains("<INSTRUCTIONS>")
-        || head.contains("<user_instructions>")
-        || head.contains("<workspace_roots>")
-        || head.contains("<permission_profile")
-        // env_context 可能拼接在长注入文本尾部，全文扫
-        || text.contains("<environment_context>")
 }
 
 /// 文本消息入列；response_item 与 event_msg 重复表达同一消息时去重
@@ -736,6 +809,191 @@ fn push_text_dedup(messages: &mut Vec<ChatMessage>, role: &str, ts: Option<Strin
             name: None,
         },
     );
+}
+
+/// 把 SAGE 编排 prompt 还原成一次真实用户任务；后续节点/汇总的同任务副本不再展示。
+/// 返回 false 表示该内部消息已过滤，调用方也应丢弃它附带的重复图片块。
+fn push_visible_user_text(
+    messages: &mut Vec<ChatMessage>,
+    ts: Option<String>,
+    text: String,
+) -> bool {
+    if let Some(original) = sage_original_task(&text) {
+        let already_visible = messages.iter().any(|message| {
+            message.role == "user"
+                && message.blocks.iter().any(|block| {
+                    block.kind == "text"
+                        && strip_image_refs(&block.text) == strip_image_refs(&original)
+                })
+        });
+        if already_visible {
+            return false;
+        }
+        push_text_dedup(messages, "user", ts, original);
+        return true;
+    }
+    if injected_user_text(&text) {
+        return false;
+    }
+    push_text_dedup(messages, "user", ts, text);
+    true
+}
+
+/// 子 agent 会话 → sub_* 块（只取正文与工具调用；与 claude 侧同口径）。
+/// 上限防止超长子任务把响应撑爆——截断后补一条提示块。
+const SUBAGENT_BLOCK_MAX: usize = 120;
+
+fn subagent_blocks(path: &Path) -> Vec<Block> {
+    subagent_tail(path, 0).0
+}
+
+/// 增量读取子 agent 会话：跳过前 skip 行，返回 (新块, 已读总行数)。
+/// 供运行中旁路跟随；skip=0 即整份读取。
+pub fn subagent_tail(path: &Path, skip: usize) -> (Vec<Block>, usize) {
+    let mut out: Vec<Block> = Vec::new();
+    let mut truncated = false;
+    let mut seen: usize = 0;
+    for_each_line(path, |line| {
+        seen += 1;
+        if seen <= skip {
+            return true;
+        }
+        if out.len() >= SUBAGENT_BLOCK_MAX {
+            truncated = true;
+            return false;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            return true;
+        };
+        if v.get("type").and_then(Value::as_str) != Some("response_item") {
+            return true;
+        }
+        let Some(p) = v.get("payload") else { return true };
+        match p.get("type").and_then(Value::as_str) {
+            Some("message") if p.get("role").and_then(Value::as_str) == Some("assistant") => {
+                let text = content_text(p.get("content"));
+                if !text.trim().is_empty() {
+                    out.push(Block {
+                        kind: "sub_text".to_string(),
+                        text: truncate_chars(&text, SUMMARY_MAX),
+                        name: None,
+                    });
+                }
+            }
+            Some("function_call" | "custom_tool_call") => {
+                let args = p
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .or_else(|| p.get("input").and_then(Value::as_str))
+                    .unwrap_or("");
+                let summary = serde_json::from_str::<Value>(args)
+                    .ok()
+                    .and_then(|j| {
+                        j.get("cmd")
+                            .or_else(|| j.get("command"))
+                            .and_then(Value::as_str)
+                            .map(String::from)
+                    })
+                    .or_else(|| extract_cmd(args))
+                    .unwrap_or_else(|| args.to_string());
+                out.push(Block {
+                    kind: "sub_tool".to_string(),
+                    text: truncate_chars(&summary, SUMMARY_MAX),
+                    name: p.get("name").and_then(Value::as_str).map(String::from),
+                });
+            }
+            _ => {}
+        }
+        true
+    });
+    if truncated {
+        out.push(Block {
+            kind: "sub_text".to_string(),
+            text: "…（子 agent 过程较长，仅展示前段）".to_string(),
+            name: None,
+        });
+    }
+    (out, seen)
+}
+
+/// 本会话派生出的子 agent 会话：(子会话 id, 文件, 展示名)。
+/// 只看 since 之后修改过的文件——全量扫首行对 2000+ 会话太贵，而运行中
+/// 新派生的子会话必然是新写入的。
+pub fn child_sessions(parent_id: &str, since: SystemTime) -> Vec<(String, PathBuf, String)> {
+    let mut out = Vec::new();
+    for (path, mtime, _size, _arch) in collect_files() {
+        if mtime < since {
+            continue;
+        }
+        let mut first = String::new();
+        for_each_line(&path, |l| {
+            first = l.to_string();
+            false
+        });
+        let Ok(v) = serde_json::from_str::<Value>(&first) else {
+            continue;
+        };
+        let Some(p) = v.get("payload") else { continue };
+        if p.get("thread_source").and_then(Value::as_str) != Some("subagent") {
+            continue;
+        }
+        let Some(spawn) = p.pointer("/source/subagent/thread_spawn") else {
+            continue;
+        };
+        if spawn.get("parent_thread_id").and_then(Value::as_str) != Some(parent_id) {
+            continue;
+        }
+        let Some(id) = p.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let label = spawn
+            .get("agent_path")
+            .and_then(Value::as_str)
+            .or_else(|| spawn.get("agent_nickname").and_then(Value::as_str))
+            .unwrap_or("subagent")
+            .to_string();
+        out.push((id.to_string(), path, label));
+    }
+    out
+}
+
+/// 把子 agent 过程插到派生它的 spawn_agent 工具块之后。
+/// spawn_calls 是按出现顺序的 call_id，与 spawn_agent 工具块同序；spawned 由
+/// sub_agent_activity 提供 call_id → 子会话 id。没有对应活动记录的派生（如启动
+/// 失败）自然落空，不会错配到别的块上。
+fn attach_subagents(
+    messages: &mut [ChatMessage],
+    spawn_calls: &[String],
+    spawned: &HashMap<String, String>,
+) {
+    if spawned.is_empty() {
+        return;
+    }
+    let anchors: Vec<(usize, usize)> = messages
+        .iter()
+        .enumerate()
+        .flat_map(|(mi, m)| {
+            m.blocks.iter().enumerate().filter_map(move |(bi, b)| {
+                (b.kind == "tool_use" && b.name.as_deref() == Some("spawn_agent"))
+                    .then_some((mi, bi))
+            })
+        })
+        .collect();
+    // 倒序插入，避免前面的插入让后面的下标漂移
+    for (idx, &(mi, bi)) in anchors.iter().enumerate().rev() {
+        let Some(child) = spawn_calls.get(idx).and_then(|c| spawned.get(c)) else {
+            continue;
+        };
+        let Some(p) = rollout_path_for(child) else {
+            continue;
+        };
+        let blocks = subagent_blocks(&p);
+        if blocks.is_empty() {
+            continue;
+        }
+        let at = bi + 1;
+        messages[mi].blocks.splice(at..at, blocks);
+    }
 }
 
 /// 剔除「请查看图片文件: <路径>」标记行（发图的文本形式，整行成立）。
@@ -780,11 +1038,15 @@ fn handle_response_item(messages: &mut Vec<ChatMessage>, payload: &Value, ts: Op
             } else {
                 strip_image_refs(&text)
             };
-            let injected = role == "user" && injected_user_text(&text);
-            if !text.trim().is_empty() && !injected {
+            let keep_assets = if text.trim().is_empty() {
+                true
+            } else if role == "user" {
+                push_visible_user_text(messages, ts.clone(), text)
+            } else {
                 push_text_dedup(messages, role, ts.clone(), text);
-            }
-            for u in images {
+                true
+            };
+            for u in images.into_iter().filter(|_| keep_assets) {
                 push_block(
                     messages,
                     role,
@@ -913,12 +1175,14 @@ fn handle_event_msg(messages: &mut Vec<ChatMessage>, payload: &Value, ts: Option
     match payload.get("type").and_then(Value::as_str) {
         Some("user_message") => {
             let text = payload.get("message").and_then(Value::as_str).unwrap_or("");
-            if !text.trim().is_empty() && !injected_user_text(text) {
-                push_text_dedup(messages, "user", ts.clone(), text.to_string());
-            }
+            let keep_assets = text.trim().is_empty()
+                || push_visible_user_text(messages, ts.clone(), text.to_string());
             // 旧式事件的图片路径数组（images / local_images）
             for key in ["images", "local_images"] {
                 if let Some(Value::Array(items)) = payload.get(key) {
+                    if !keep_assets {
+                        continue;
+                    }
                     for it in items {
                         if let Some(p) = it.as_str().filter(|p| !p.is_empty()) {
                             push_block(
@@ -1060,10 +1324,7 @@ fn handle_event_msg(messages: &mut Vec<ChatMessage>, payload: &Value, ts: Option
             }
             match ty.as_str() {
                 "usermessage" => {
-                    if injected_user_text(&text) {
-                        return;
-                    }
-                    push_text_dedup(messages, "user", ts, text);
+                    push_visible_user_text(messages, ts, text);
                 }
                 "agentmessage" => push_text_dedup(messages, "assistant", ts, text),
                 "reasoning" => push_block(
@@ -1080,5 +1341,59 @@ fn handle_event_msg(messages: &mut Vec<ChatMessage>, payload: &Value, ts: Option
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    const ORIGINAL: &str = "检查这个活动玩法，时间是不是有问题";
+
+    fn collaborate_prompt(node: &str) -> String {
+        format!(
+            "【SAGE COLLABORATE · {node}】\n任务所有者：Codex\n当前执行者：Codex\n完整分工：debugging → Codex\n\n原始任务：\n{ORIGINAL}\n\n请完成本节点并给出可供下游节点直接使用的明确产出。"
+        )
+    }
+
+    #[test]
+    fn sage_prompt_title_and_transcript_use_original_task_once() {
+        let prompt = collaborate_prompt("debugging");
+        let envelope = json!({
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": prompt}
+        });
+        assert_eq!(title_candidate(&envelope).as_deref(), Some(ORIGINAL));
+
+        let mut messages = Vec::new();
+        for node in ["debugging", "review"] {
+            let payload = json!({
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": collaborate_prompt(node)}]
+            });
+            handle_response_item(&mut messages, &payload, None);
+        }
+        let user_texts: Vec<&str> = messages
+            .iter()
+            .filter(|message| message.role == "user")
+            .flat_map(|message| message.blocks.iter())
+            .filter(|block| block.kind == "text")
+            .map(|block| block.text.as_str())
+            .collect();
+        assert_eq!(user_texts, vec![ORIGINAL]);
+
+        let continuation = json!({
+            "type": "message",
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\ninternal"
+            }]
+        });
+        let mut injected_messages = Vec::new();
+        handle_response_item(&mut injected_messages, &continuation, None);
+        assert!(injected_messages.is_empty());
     }
 }
