@@ -68,14 +68,23 @@ pub(crate) fn clean_title(s: &str) -> String {
 
 /// SAGE 会把内部编排说明作为 CLI 的 user prompt 写入原生历史。
 /// 历史/UI 只能暴露真实原始任务，不能把 HANDOFF/COLLABORATE 指令冒充用户输入。
+/// 跨会话上下文转移块的起始标记：被移交/被拉进协作的 agent 拿到的是全新会话，
+/// 前端把来源会话记录附在原始任务之后。标题与气泡只取任务，记录不入正文。
+pub(crate) const SAGE_CONTEXT_MARKER: &str = "\n\n【来源会话上下文】";
+
 pub(crate) fn sage_original_task(text: &str) -> Option<String> {
     let text = text.trim();
     let original = if text.starts_with("【SAGE HANDOFF】") {
-        text.split_once("\n\n")?.1
+        let rest = text.split_once("\n\n")?.1;
+        match rest.find(SAGE_CONTEXT_MARKER) {
+            Some(end) => &rest[..end],
+            None => rest,
+        }
     } else if text.starts_with("【SAGE COLLABORATE") {
         let (_, rest) = text.split_once("原始任务：")?;
         let rest = rest.trim_start_matches(['\r', '\n']);
         let end = [
+            SAGE_CONTEXT_MARKER,
             "\n\n依赖节点产出：",
             "\n\n节点产出：",
             "\n\n请完成本节点",
@@ -1116,6 +1125,24 @@ mod tests {
             sage_original_task(&collaborate_prompt("analysis")).as_deref(),
             Some(ORIGINAL)
         );
+        // 跨会话上下文转移：来源会话记录附在任务之后，不得混进标题与正文
+        let handoff_ctx = format!(
+            "{}{}你接手的是一个已在进行中的对话。\n\n〔用户〕上一轮问题\n\n〔Codex〕上一轮结论",
+            handoff_prompt(),
+            SAGE_CONTEXT_MARKER
+        );
+        assert_eq!(sage_original_task(&handoff_ctx).as_deref(), sage_original_task(&handoff_prompt()).as_deref());
+        assert_eq!(user_title_source(&handoff_ctx), ORIGINAL);
+        assert_eq!(
+            sage_prompt_metadata(&handoff_ctx).unwrap().source_session_id.as_deref(),
+            Some("origin-session")
+        );
+        let collab_ctx = collaborate_prompt("analysis").replace(
+            "\n\n请完成本节点",
+            &format!("{}来源记录\n\n请完成本节点", SAGE_CONTEXT_MARKER),
+        );
+        assert_eq!(sage_original_task(&collab_ctx).as_deref(), Some(ORIGINAL));
+
         let meta = sage_prompt_metadata(&collaborate_prompt("analysis")).unwrap();
         assert_eq!(meta.kind, "collaborate");
         assert_eq!(meta.workflow_id.as_deref(), Some("sage-flow-1"));

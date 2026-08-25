@@ -269,3 +269,17 @@ assert.equal(
   console.error(error);
   process.exitCode = 1;
 });
+
+// 跨会话上下文转移：来源会话记录附在任务之后，气泡里只显示原始任务
+const HANDOFF_CTX =
+  '【SAGE HANDOFF】路由判定你接管本任务的完整所有权。\n' +
+  '协作标识：flow-1\n来源会话：codex:origin\n\n' +
+  '生成文档\n\n【来源会话上下文】你接手的是一个已在进行中的对话。\n\n〔用户〕检查对齐\n\n〔Codex〕结论如下';
+assert.equal(visibleUserPrompt(HANDOFF_CTX), '生成文档');
+const COLLAB_CTX =
+  '【SAGE COLLABORATE · coding】\n任务所有者：Claude\n当前执行者：Codex\n\n' +
+  '原始任务：\n所以最终结果是什么？\n\n【来源会话上下文】〔用户〕之前的问题\n\n' +
+  '请完成本节点并给出可供下游节点直接使用的明确产出。';
+assert.equal(visibleUserPrompt(COLLAB_CTX), '所以最终结果是什么？');
+
+console.log('sage context-transfer tests passed');

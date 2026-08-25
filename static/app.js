@@ -4263,7 +4263,7 @@ function permissionForAgent(agent) {
 }
 
 function sageRequirementPrompt(
-  decision, requirement, originalTask, dependencyOutputs, workflowId, primaryRef
+  decision, requirement, originalTask, dependencyOutputs, workflowId, primaryRef, sourceContext
 ) {
   const owner = decision.primary;
   const agent = decision.assignments[requirement];
@@ -4288,7 +4288,7 @@ function sageRequirementPrompt(
     `完整分工：${assignments || '无'}\n` +
     `通信拓扑：${topology || '无跨 Agent 边'}\n` +
     `本节点依赖：${dependencies.join('、') || '无'}\n\n` +
-    `原始任务：\n${originalTask}` + prior +
+    `原始任务：\n${originalTask}` + (sourceContext || '') + prior +
     '\n\n请完成本节点并给出可供下游节点直接使用的明确产出。'
   );
 }
@@ -4314,7 +4314,71 @@ function sageSummaryPrompt(decision, originalTask, results, workflowId, primaryR
   );
 }
 
-/** 独立 SAGE 节点流：每个并行阶段拥有自己的 DOM、事件状态和会话 id。 */
+/* ---------- 跨会话上下文转移 ---------- */
+
+const SAGE_CONTEXT_BUDGET = 12000; // 附带的来源记录字符上限
+const SAGE_TURN_MAX = 3000; // 单轮截断长度
+
+/** 被移交 / 被拉进协作的 agent 拿到的是全新会话。只发一句原始任务时，
+ *  「生成文档」这类追问它无从判断对象，只能在工作区里另找题目。
+ *  官方 HANDOFF 的效用估算本就假设上下文可转移（transferable_context=1），
+ *  这里把实际转移补齐：附上来源会话的用户提问与每轮最终回答。 */
+async function sageSourceContext(sess) {
+  if (!sess || !sess.id) return '';
+  try {
+    return await buildSageSourceContext(sess);
+  } catch (_) {
+    return ''; // 取不到或解析异常都退回无上下文，绝不阻塞本轮执行
+  }
+}
+
+async function buildSageSourceContext(sess) {
+  const tr = await api.get(
+    '/api/session?' +
+      new URLSearchParams({ agent: sess.agent, id: sess.id, project: sess.project || '' })
+  );
+  const msgs = tr.messages || [];
+  const finals = turnFinalAssistants(msgs);
+  const who = AGENTS[sess.agent] ? AGENTS[sess.agent].label : sess.agent;
+  const turns = [];
+  msgs.forEach((m, i) => {
+    const text = (m.blocks || [])
+      .filter((b) => b.kind === 'text' && b.text)
+      .map((b) => b.text)
+      .join('\n')
+      .trim();
+    if (!text) return;
+    if (m.role === 'user') {
+      const shown = visibleUserText(text);
+      if (shown) turns.push('〔用户〕' + shown);
+    } else if (m.role === 'assistant' && finals.has(i)) {
+      turns.push(`〔${who}〕` + text);
+    }
+  });
+  if (!turns.length) return '';
+  // 预算内从最近一轮往回收，保证紧邻当前任务的上下文一定在。
+  // 这里不能用 snippet()：它会把换行压成空格，长回答的结构会整段糊掉。
+  const clip = (text) =>
+    text.length > SAGE_TURN_MAX ? text.slice(0, SAGE_TURN_MAX) + '\n…（本轮已截断）' : text;
+  const kept = [];
+  let used = 0;
+  for (let i = turns.length - 1; i >= 0; i--) {
+    const item = clip(turns[i]);
+    if (kept.length && used + item.length > SAGE_CONTEXT_BUDGET) break;
+    kept.unshift(item);
+    used += item.length;
+  }
+  const omitted = turns.length - kept.length;
+  return (
+    SageScheduler.SAGE_CONTEXT_MARKER +
+    `以下是来源会话（${who}）在移交前的对话记录` +
+    (omitted > 0 ? `（较早的 ${omitted} 段已省略）` : '') +
+    '。\n当前任务要放在这段上下文里理解，不要在工作区里另找题目；' +
+    '记录不足以确定任务对象时，先说明缺什么，不要凭猜测产出。\n\n' +
+    kept.join('\n\n')
+  );
+}
+
 /** 被依赖阻塞或 DAG 成环而没跑的节点也要在正文留痕，
  *  否则它只在汇总里以「失败」出现，用户在页面上完全找不到对应节点。 */
 function appendSageSkipped(decision, requirement, reason) {
@@ -4383,6 +4447,7 @@ function sageUsageApply(key, ev, isOwner) {
   } catch (_) { /* 忽略 */ }
 }
 
+/** 独立 SAGE 节点流：每个并行阶段拥有自己的 DOM、事件状态和会话 id。 */
 async function runSageStage(options) {
   const { requirement, prompt, project, sessionId, isOwner, signal, onSession } = options;
   const executor = options.executor;
@@ -4656,6 +4721,10 @@ async function runSageCollaboration(decision, originalTask) {
     maybeLinkPartners();
   };
   beginSageUsage();
+  // 所有者节点跑在既有会话里、本就带着历史；搭档是全新会话，得把来源记录带过去
+  const sourceContext = await sageSourceContext(
+    state.session && state.session.id ? state.session : null
+  );
   try {
     while (pending.size && !controller.signal.aborted) {
       const wave = SageScheduler.nextWave(pending, results, dependencies, assignments);
@@ -4697,7 +4766,8 @@ async function runSageCollaboration(decision, originalTask) {
             originalTask,
             dependencyOutputs,
             workflowId,
-            sessions[owner] ? `${ownerExecutor.runtime}:${sessions[owner]}` : ''
+            sessions[owner] ? `${ownerExecutor.runtime}:${sessions[owner]}` : '',
+            agent === owner ? '' : sourceContext
           ),
           project: collaborationProject,
           sessionId: sessions[agent],
@@ -4800,6 +4870,8 @@ async function runSageHandoff(decision, originalTask) {
     decision.workflow_id || `sage-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   decision.workflow_id = workflowId;
   beginSageUsage();
+  // 移交前先把来源会话的记录取出来，否则接管方只拿到一句孤立的任务
+  const sourceContext = await sageSourceContext(previous);
   try {
     const result = await runSageStage({
       executor: sageExecutor(decision, decision.primary),
@@ -4811,7 +4883,7 @@ async function runSageHandoff(decision, originalTask) {
         (previous.id ? `来源会话：${previous.agent}:${previous.id}\n` : '') +
         `任务所有者：${sageExecutorLabel(decision, decision.primary)}\n` +
         `当前执行者：${sageExecutorLabel(decision, decision.primary)}\n\n` +
-        originalTask,
+        originalTask + sourceContext,
       project: state.session.project,
       sessionId: null,
       isOwner: true,

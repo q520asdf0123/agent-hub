@@ -1,4 +1,7 @@
 var SageScheduler = (function () {
+  /** 跨会话上下文转移块的起始标记，与 src/history/claude.rs 保持一致 */
+  const SAGE_CONTEXT_MARKER = '\n\n【来源会话上下文】';
+
   function nextWave(pendingNames, results, dependencies, assignments) {
     const pending = [...pendingNames];
     const ready = pending.filter((name) =>
@@ -86,7 +89,10 @@ var SageScheduler = (function () {
     if (!value) return '';
     if (value.startsWith('【SAGE HANDOFF】')) {
       const split = value.indexOf('\n\n');
-      return split >= 0 ? value.slice(split + 2).trim() : '';
+      if (split < 0) return '';
+      const rest = value.slice(split + 2);
+      const end = rest.indexOf(SAGE_CONTEXT_MARKER);
+      return (end >= 0 ? rest.slice(0, end) : rest).trim();
     }
     if (value.startsWith('【SAGE COLLABORATE')) {
       if (value.startsWith('【SAGE COLLABORATE · 所有者汇总】')) return '';
@@ -94,7 +100,7 @@ var SageScheduler = (function () {
       const start = value.indexOf(marker);
       if (start < 0) return '';
       const rest = value.slice(start + marker.length).replace(/^[\r\n]+/, '');
-      const ends = ['\n\n依赖节点产出：', '\n\n节点产出：', '\n\n请完成本节点']
+      const ends = [SAGE_CONTEXT_MARKER, '\n\n依赖节点产出：', '\n\n节点产出：', '\n\n请完成本节点']
         .map((item) => rest.indexOf(item))
         .filter((index) => index >= 0);
       return rest.slice(0, ends.length ? Math.min(...ends) : rest.length).trim();
@@ -262,6 +268,7 @@ var SageScheduler = (function () {
   }
 
   return {
+    SAGE_CONTEXT_MARKER,
     nextWave,
     executeWave,
     buildRunsIndex,
