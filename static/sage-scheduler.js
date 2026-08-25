@@ -174,6 +174,8 @@ var SageScheduler = (function () {
         kind: meta.kind === 'handoff' ? 'handoff' : 'pipeline',
         cats: meta.requirement || '',
         workflow_id: meta.workflow_id || null,
+        // 复用移交分支要挑最近一条，没有时间戳就只能靠数组顺序，不可靠
+        ts: parseInt(String(run.run_id || '').split('-')[1] || '0', 10) || 0,
       },
     };
   }
@@ -257,10 +259,31 @@ var SageScheduler = (function () {
         sage: meta,
       });
       if (!link || seen.has(link.partnerKey)) continue;
+      link.entry.ts = Date.parse(target.created || target.updated || '') || link.entry.ts || 0;
+      if (target.title) link.entry.title = target.title; // 复用分支时抬头沿用它自己的标题
       seen.add(link.partnerKey);
       links.push(link);
     }
     return links;
+  }
+
+  /** 同一来源会话已经移交给同一 runtime 时，取回那条分支（取最近一条）。
+   *  每次追问都新建会话会让侧栏堆满同名条目，上下文也无法在分支里累积。
+   *
+   *  只按 runtime 匹配，不比 model / effort：移交的语义是「交给另一个 CLI 接管」，
+   *  同一 CLI 换个模型仍是同一条分支，再劈一条只会重新制造碎片。
+   *  （COLLABORATE 不能这样——同一 runtime 的多个搭档节点必须各用各的会话。）
+   *  link.executor 在不同写入点分别存过 id 和 label，因此不作为匹配键。 */
+  function reusableHandoffLink(links, runtime) {
+    const prefix = String(runtime || '') + ':';
+    let best = null;
+    for (const link of links || []) {
+      if (!link || link.kind !== 'handoff') continue;
+      if (!String(link.partner || '').startsWith(prefix)) continue;
+      // 取时间戳最大的一条；时间戳缺失（旧记录）时以数组靠后者为准
+      if (!best || (Number(link.ts) || 0) >= (Number(best.ts) || 0)) best = link;
+    }
+    return best;
   }
 
   function shouldReloadInstance(currentId, nextId) {
@@ -280,6 +303,7 @@ var SageScheduler = (function () {
     isNestedSageSession,
     isLegacyHandoffSource,
     collabLinksFromSessions,
+    reusableHandoffLink,
     shouldReloadInstance,
   };
 })();

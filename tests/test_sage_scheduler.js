@@ -6,6 +6,7 @@ const {
   isNestedSageSession,
   isLegacyHandoffSource,
   collabLinksFromSessions,
+  reusableHandoffLink,
   shouldReloadInstance,
 } = require('../static/sage-scheduler.js');
 
@@ -122,6 +123,7 @@ assert.deepEqual(
       kind: 'handoff',
       cats: '',
       workflow_id: 'flow-1',
+      ts: 0,
     },
   }
 );
@@ -283,3 +285,31 @@ const COLLAB_CTX =
 assert.equal(visibleUserPrompt(COLLAB_CTX), '所以最终结果是什么？');
 
 console.log('sage context-transfer tests passed');
+
+// 追问再次被判定为移交时，复用同一条分支而不是每次新建会话
+const handoffLinks = [
+  { partner: 'claude:newest', kind: 'handoff', executor: 'claude::sonnet', title: '生成文档', ts: 300 },
+  { partner: 'codex:helper', kind: 'pipeline', executor: 'codex::terra', ts: 400 },
+  { partner: 'claude:older', kind: 'handoff', executor: 'Claude Code · sonnet · low', ts: 200 },
+];
+// 数组顺序不代表新旧，必须按时间戳取最近一条
+assert.equal(reusableHandoffLink(handoffLinks, 'claude').partner, 'claude:newest');
+// executor 字段在两个写入点分别存过 id 和 label，不能作为匹配键
+assert.equal(reusableHandoffLink(handoffLinks, 'codex'), null);
+// 同一 CLI 换模型仍是同一条分支，不再劈新会话
+assert.equal(
+  reusableHandoffLink([{ partner: 'codex:legacy', kind: 'handoff' }], 'codex').partner,
+  'codex:legacy'
+);
+// 时间戳都缺失时以数组靠后者为准
+assert.equal(
+  reusableHandoffLink(
+    [{ partner: 'claude:a', kind: 'handoff' }, { partner: 'claude:b', kind: 'handoff' }],
+    'claude'
+  ).partner,
+  'claude:b'
+);
+assert.equal(reusableHandoffLink([], 'claude'), null);
+assert.equal(reusableHandoffLink(null, 'claude'), null);
+
+console.log('sage handoff-reuse tests passed');

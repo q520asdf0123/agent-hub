@@ -4323,16 +4323,17 @@ const SAGE_TURN_MAX = 3000; // 单轮截断长度
  *  「生成文档」这类追问它无从判断对象，只能在工作区里另找题目。
  *  官方 HANDOFF 的效用估算本就假设上下文可转移（transferable_context=1），
  *  这里把实际转移补齐：附上来源会话的用户提问与每轮最终回答。 */
-async function sageSourceContext(sess) {
+async function sageSourceContext(sess, sinceTs) {
   if (!sess || !sess.id) return '';
   try {
-    return await buildSageSourceContext(sess);
+    return await buildSageSourceContext(sess, sinceTs || 0);
   } catch (_) {
     return ''; // 取不到或解析异常都退回无上下文，绝不阻塞本轮执行
   }
 }
 
-async function buildSageSourceContext(sess) {
+/** sinceTs > 0 表示这条分支已经转过一次上下文，只补它之后的新增轮次。 */
+async function buildSageSourceContext(sess, sinceTs) {
   const tr = await api.get(
     '/api/session?' +
       new URLSearchParams({ agent: sess.agent, id: sess.id, project: sess.project || '' })
@@ -4342,6 +4343,10 @@ async function buildSageSourceContext(sess) {
   const who = AGENTS[sess.agent] ? AGENTS[sess.agent].label : sess.agent;
   const turns = [];
   msgs.forEach((m, i) => {
+    if (sinceTs) {
+      const ts = Date.parse(m.ts || '');
+      if (!Number.isFinite(ts) || ts <= sinceTs) return;
+    }
     const text = (m.blocks || [])
       .filter((b) => b.kind === 'text' && b.text)
       .map((b) => b.text)
@@ -4371,7 +4376,9 @@ async function buildSageSourceContext(sess) {
   const omitted = turns.length - kept.length;
   return (
     SageScheduler.SAGE_CONTEXT_MARKER +
-    `以下是来源会话（${who}）在移交前的对话记录` +
+    (sinceTs
+      ? `以下是来源会话（${who}）自上次移交以来的新增记录`
+      : `以下是来源会话（${who}）在移交前的对话记录`) +
     (omitted > 0 ? `（较早的 ${omitted} 段已省略）` : '') +
     '。\n当前任务要放在这段上下文里理解，不要在工作区里另找题目；' +
     '记录不足以确定任务对象时，先说明缺什么，不要凭猜测产出。\n\n' +
@@ -4843,21 +4850,32 @@ async function runSageCollaboration(decision, originalTask) {
   }
 }
 
-/** 官方 HANDOFF：peer 接管所有权并创建新的主会话。 */
+function existingHandoffLink(previous, decision, executor) {
+  if (!previous || !previous.id) return null;
+  const links = collabStoreLoad().links[previous.agent + ':' + previous.id] || [];
+  return SageScheduler.reusableHandoffLink(links, executor.runtime);
+}
+
+/** 官方 HANDOFF：peer 接管所有权。首次移交新建会话，后续追问接回同一条分支。 */
 async function runSageHandoff(decision, originalTask) {
   const previous = state.session;
   const executor = applySagePrimary(decision);
   if (state.agentFilter && state.agentFilter !== executor.runtime) setAgentFilter('');
+  const reusedLink = existingHandoffLink(previous, decision, executor);
+  const reusedId = reusedLink
+    ? reusedLink.partner.slice(reusedLink.partner.indexOf(':') + 1)
+    : null;
   state.session = {
     agent: executor.runtime,
-    id: null,
+    id: reusedId,
     project: previous.project,
-    title: snippet(originalTask, 40),
+    // 复用时沿用分支自己的标题，别被本轮追问覆盖
+    title: (reusedLink && reusedLink.title) || snippet(originalTask, 40),
     model: executor.model || null,
     effort: decision.primary_effort || executor.effort || null,
   };
   setChatHead(state.session);
-  setActiveRow(null);
+  setActiveRow(reusedId ? executor.runtime + ':' + reusedId : null);
   state.pendingSage = decision;
   state.streaming = true;
   state.runId = null;
@@ -4870,8 +4888,13 @@ async function runSageHandoff(decision, originalTask) {
     decision.workflow_id || `sage-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   decision.workflow_id = workflowId;
   beginSageUsage();
-  // 移交前先把来源会话的记录取出来，否则接管方只拿到一句孤立的任务
-  const sourceContext = await sageSourceContext(previous);
+  // 移交前先把来源会话的记录取出来，否则接管方只拿到一句孤立的任务。
+  // 复用分支时只补上次移交之后的新增轮次，不重复灌整段历史。
+  const contextTs = Date.now();
+  const sourceContext = await sageSourceContext(
+    previous,
+    reusedLink ? reusedLink.context_ts || 0 : 0
+  );
   try {
     const result = await runSageStage({
       executor: sageExecutor(decision, decision.primary),
@@ -4885,7 +4908,7 @@ async function runSageHandoff(decision, originalTask) {
         `当前执行者：${sageExecutorLabel(decision, decision.primary)}\n\n` +
         originalTask + sourceContext,
       project: state.session.project,
-      sessionId: null,
+      sessionId: reusedId,
       isOwner: true,
       signal: controller.signal,
       onSession: (_, sid) => {
@@ -4903,6 +4926,9 @@ async function runSageHandoff(decision, originalTask) {
               kind: 'handoff',
               cats: '',
               workflow_id: workflowId,
+              // 分支标题与上下文水位：后续追问据此复用会话、只补增量
+              title: state.session.title,
+              context_ts: contextTs,
               ts: Date.now(),
             },
             targetKey
