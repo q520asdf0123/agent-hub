@@ -128,6 +128,9 @@ pub struct SageReq {
     pub agent: Option<String>,
     /// 本任务此前已失败过的 agent（ExecutionState.failed_agents，触发失败重路由）
     pub failed: Option<Vec<String>>,
+    /// 运行期确认当前 provider 不提供的执行体（model_not_found 等）；同样硬排除，
+    /// 但不计入本任务的 failure_count。
+    pub unavailable: Option<Vec<String>>,
     /// 官方 ExecutionState 的前端可观测部分。
     pub state: Option<serde_json::Value>,
     /// Task 约束；服务端会覆盖 available_agents，避免选择未安装 CLI。
@@ -139,6 +142,7 @@ pub async fn sage_route(
     Json(body): Json<SageReq>,
 ) -> Response {
     let failed = body.failed.unwrap_or_default();
+    let unavailable = body.unavailable.unwrap_or_default();
     let status = crate::cli::status().await;
     let mut available = Vec::new();
     if status.claude.installed {
@@ -170,6 +174,7 @@ pub async fn sage_route(
         &body.prompt,
         body.agent.as_deref().unwrap_or("claude"),
         &failed,
+        &unavailable,
         body.state.unwrap_or_else(|| json!({})),
         serde_json::Value::Object(constraints),
     )

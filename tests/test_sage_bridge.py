@@ -252,6 +252,79 @@ class SageBridgeTests(unittest.TestCase):
             finally:
                 sage_bridge.STATE_PATH = original
 
+    def test_keywords_do_not_misread_plain_questions(self):
+        """「写」曾是单字关键词，把纯提问判成写代码任务；复查/单元测试则整个漏掉。"""
+        asking, matched = sage_bridge.infer_requirements("这段代码是怎么写的")
+        self.assertNotEqual(asking, {"coding": 1.0})
+        writing, _ = sage_bridge.infer_requirements("帮我写个导出脚本")
+        self.assertIn("coding", writing)
+        review, _ = sage_bridge.infer_requirements("做一轮安全复查")
+        self.assertIn("review", review)
+        tests, _ = sage_bridge.infer_requirements("补齐单元测试")
+        self.assertIn("coding", tests)
+
+    def test_unrecognised_prompt_falls_back_to_incumbent_strengths(self):
+        """认不出任务类型时不该替用户换人：需求取在任执行者的强项，让效用比较落回 SELF。
+
+        旧实现兜底成 {coding, analysis}，而 analysis 上 claude 天然占优，
+        导致「这个字段是干嘛的」这种没有技术动词的随口一问也会被移交出去。
+        """
+        profiles = sage_bridge._legacy_profiles()
+        for runtime in ("codex", "claude"):
+            weights, matched = sage_bridge.infer_requirements(
+                "这个字段是干嘛的", profiles[runtime]["skills"]
+            )
+            self.assertFalse(matched, "该 prompt 本就不该命中任何关键词")
+            best = max(profiles[runtime]["skills"], key=profiles[runtime]["skills"].get)
+            self.assertIn(best, weights, f"{runtime} 的兜底需求应包含它自己的强项")
+
+    def test_live_session_state_damps_drift(self):
+        """上游 ALGORITHM.md：积累了不可转移的工作之后，重新规划应该变难。
+
+        app.js 曾对没有路由记录的会话传 active_agents=[]（命中上游
+        「无 active route」分支，移交成本归零）外加 progress=0 /
+        transferable_context=1，三者叠加把切换阻尼整个关掉——这才是
+        每轮追问都换模型的根因。
+        """
+        def route(prompt, active_agents, progress, transferable):
+            return self.route(
+                prompt=prompt,
+                incumbent="codex",
+                constraints={
+                    "available_agents": ["claude", "codex"],
+                    "model_catalog": self.MODEL_CATALOG,
+                    "incumbent_model": "gpt-5.6-sol",
+                    "max_team_size": 5,
+                },
+                state={
+                    "active_agents": active_agents,
+                    "active_mode": "self",
+                    "progress": progress,
+                    "transferable_context": transferable,
+                    "failed_agents": [],
+                    "failure_count": 0,
+                },
+            )
+
+        # 旧行为：会话在跑却宣称无人在任 + 毫无积累 + 上下文可无损转移 → 拱手让人
+        drifted = route("整理并输出一份架构设计方案", [], 0, 1)
+        self.assertEqual(drifted["mode"], "handoff")
+        self.assertFalse(
+            drifted["primary"].startswith("codex"), "旧参数下应当复现漂移：所有权被交出去"
+        )
+
+        # 修复后：在任执行者如实上报，进度与可转移度交给上游默认值 → 保住所有权
+        damped = route("整理并输出一份架构设计方案", ["codex"], 0.5, None)
+        self.assertTrue(
+            damped["primary"].startswith("codex"), "如实上报会话状态后，在任执行者应当保住所有权"
+        )
+
+        # 但阻尼不是一刀切：短板悬殊、移交收益明确时仍然要移交，
+        # 否则就从「乱换人」矫枉过正成「永远不换人」。
+        docs = route("写一份项目说明文档", ["codex"], 0.5, None)
+        self.assertEqual(docs["mode"], "handoff")
+        self.assertTrue(docs["primary"].startswith("claude"))
+
 
 if __name__ == "__main__":
     unittest.main()

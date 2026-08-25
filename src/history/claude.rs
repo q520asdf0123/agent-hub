@@ -648,7 +648,7 @@ pub fn transcript(project: &str, session_id: &str) -> Result<Transcript, String>
             "input": u_in, "output": u_out,
             "cache_read": u_cr, "cache_write": u_cw,
             "context": u_ctx, "first_ts": first_ts, "last_ts": last_ts,
-            "model": last_model,
+            "model": last_model.clone(),
         }))
     } else {
         None
@@ -668,6 +668,7 @@ pub fn transcript(project: &str, session_id: &str) -> Result<Transcript, String>
         messages,
         sage,
         usage,
+        model: last_model,
     })
 }
 

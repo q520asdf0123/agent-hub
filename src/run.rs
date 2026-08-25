@@ -749,6 +749,11 @@ fn build_args(req: &ChatReq) -> (Vec<String>, String) {
                 push_service_tier(&mut args, req);
                 push_memory_bypass(&mut args, req);
                 push_codex_images(&mut args, req);
+                // 续聊同样带模型：SAGE 同 runtime 的原地接管、用户中途换模型都靠它生效
+                if let Some(m) = req.model.as_deref().filter(|m| !m.trim().is_empty()) {
+                    args.push("-m".to_string());
+                    args.push(m.to_string());
+                }
                 if req.permission.as_deref() == Some("bypass") {
                     args.push("--dangerously-bypass-approvals-and-sandbox".to_string());
                 }
@@ -1597,6 +1602,32 @@ mod tests {
             );
             assert!(!args.iter().any(|arg| arg.contains("service_tier=\"standard\"")));
         }
+    }
+
+    /// codex 续聊必须带 -m：SAGE 同 runtime 的原地接管靠换模型生效，
+    /// 早期 resume 分支漏传时会静默沿用旧模型。
+    #[test]
+    fn codex_resume_carries_model() {
+        let req = ChatReq {
+            agent: "codex".to_string(),
+            project: ".".to_string(),
+            prompt: "继续".to_string(),
+            session_id: Some("01a03804-55d2-77e3-96ce-527d906472a8".to_string()),
+            model: Some("gpt-5.2".to_string()),
+            permission: Some("default".to_string()),
+            fast: Some(true),
+            memory: Some(false),
+            effort: Some("medium".to_string()),
+        };
+        let (args, _) = build_args(&req);
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-m" && pair[1] == "gpt-5.2"),
+            "resume 应带上模型：{args:?}"
+        );
+        // 模型缺省时不塞空 -m
+        let bare = ChatReq { model: None, ..req };
+        assert!(!build_args(&bare).0.iter().any(|arg| arg == "-m"));
     }
 
     #[test]

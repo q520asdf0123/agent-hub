@@ -253,6 +253,16 @@ button { font-family: inherit; }
 .srow:hover { background: var(--card); }
 .srow.active { background: var(--bubble); }
 .srow.archived { opacity: 0.6; }
+/* SAGE 移交子会话：缩进 + 左侧引导线，挂在来源会话下面 */
+.srow.srow-sub {
+  margin-left: 24px;
+  padding-left: 7px;
+  border-left: 2px solid var(--border);
+  border-radius: 0 6px 6px 0;
+}
+.proj-sessions .srow.srow-sub { margin-left: 16px; }
+.srow.srow-sub .srow-title { font-size: 12.5px; color: var(--dim); }
+.srow.srow-sub.active .srow-title { color: var(--fg2); }
 .agent-dot { font-size: 11px; flex-shrink: 0; line-height: 1; }
 .ag-claude { color: var(--claude); }
 .ag-codex { color: var(--codex); }
@@ -266,6 +276,26 @@ button { font-family: inherit; }
   color: var(--fg2);
 }
 .srow-time { font-size: 11px; color: var(--dim); flex-shrink: 0; }
+/* 移交分支的收起/展开：箭头常驻，收起时额外露出子会话条数 */
+.srow-caret {
+  font-size: 10px;
+  color: var(--faint);
+  flex-shrink: 0;
+  line-height: 1.5;
+  padding: 0 1px;
+  transition: transform 0.15s, color 0.15s;
+}
+.srow-caret:hover { color: var(--fg2); }
+.srow-caret.open { transform: rotate(90deg); }
+.srow-subcount {
+  font-size: 10px;
+  color: var(--dim);
+  flex-shrink: 0;
+  background: var(--card);
+  border-radius: 8px;
+  padding: 0 5px;
+  line-height: 1.6;
+}
 
 /* 底部 CLI 状态 */
 #cli-status {
@@ -991,6 +1021,13 @@ button { font-family: inherit; }
   margin: 6px 0;
 }
 .divider.collab-jump { cursor: pointer; }
+/* 执行者已在首轮定下：开着但不再重新决策，弱化一档与「正在自动路由」区分 */
+.chip.locked-decision.on { opacity: 0.72; }
+/* 移交结论：接管方的最终回答，摊在来源会话里（只读展示，主 agent 不再跑一轮） */
+.handoff-result { margin: 4px 0 8px; }
+.handoff-result .card-body { max-height: 420px; overflow-y: auto; }
+.handoff-result.empty-note .card-head { cursor: default; }
+.handoff-result.empty-note .card-caret { visibility: hidden; }
 .divider.collab-jump:hover span { color: var(--accent2); }
 @keyframes ticker-pulse {
   0%, 100% { opacity: 0.35; transform: scale(0.85); }

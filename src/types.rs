@@ -64,6 +64,11 @@ pub struct Transcript {
     pub sage: Vec<SagePromptMeta>,
     /// 整场用量汇总（input/output/cache_read/cache_write/context/window/first_ts/last_ts/model）
     pub usage: Option<serde_json::Value>,
+    /// 会话最后生效的模型。resume 会带模型下发，前端据此回填，
+    /// 免得用界面上次选的模型顶掉这条会话原本在跑的模型。
+    /// 独立于 usage：没有用量事件的短会话同样要能拿到。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]

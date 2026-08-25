@@ -4,6 +4,10 @@ const {
   shouldInspectCollabCandidate, selectStopRunIds,
   collabLinkFromRun,
   isNestedSageSession,
+  handoffStaysInPlace,
+  shouldRouteFollowUp,
+  handoffParentKey,
+  buildSessionTree,
   isLegacyHandoffSource,
   collabLinksFromSessions,
   reusableHandoffLink,
@@ -313,3 +317,136 @@ assert.equal(reusableHandoffLink([], 'claude'), null);
 assert.equal(reusableHandoffLink(null, 'claude'), null);
 
 console.log('sage handoff-reuse tests passed');
+
+// ---- 同 runtime 的移交原地接管，不另开会话 ----
+const inPlaceDecision = { mode: 'handoff', primary: 'codex::gpt-5.2' };
+assert.equal(
+  handoffStaysInPlace(inPlaceDecision, { agent: 'codex', id: 'live' }, 'codex'),
+  true
+);
+// 跨 CLI 的移交仍必须新建会话（两家会话文件互不通用）
+assert.equal(
+  handoffStaysInPlace(inPlaceDecision, { agent: 'codex', id: 'live' }, 'claude'),
+  false
+);
+// 还没有会话（Hero 首轮）时无所谓「原地」
+assert.equal(handoffStaysInPlace(inPlaceDecision, { agent: 'codex', id: null }, 'codex'), false);
+assert.equal(handoffStaysInPlace(inPlaceDecision, null, 'codex'), false);
+// self / collaborate 不受影响
+assert.equal(
+  handoffStaysInPlace({ mode: 'self', primary: 'codex::gpt-5.2' }, { agent: 'codex', id: 'live' }, 'codex'),
+  false
+);
+
+console.log('sage in-place handoff tests passed');
+
+// ---- 侧栏分组：移交子会话挂到来源会话下 ----
+const treeSessions = [
+  {
+    agent: 'codex', id: 'child', updated: '2026-08-25T08:31:39Z',
+    sage: { kind: 'handoff', source_agent: 'codex', source_session_id: 'parent' },
+  },
+  { agent: 'codex', id: 'parent', updated: '2026-08-25T08:30:31Z' },
+  { agent: 'claude', id: 'solo', updated: '2026-08-25T08:40:00Z' },
+];
+const tree = buildSessionTree(treeSessions, {}, {});
+assert.deepEqual(
+  tree.map((node) => [node.session.agent + ':' + node.session.id, node.children.length]),
+  [['claude:solo', 0], ['codex:parent', 1]]
+);
+// 分支排序看子会话的时间：父会话没更新也不该沉底
+assert.equal(tree[1].children[0].id, 'child');
+// 来源会话不在本次列表里（被 limit 截断 / 跨项目）→ 子会话回退成顶层条目
+const orphan = buildSessionTree([treeSessions[0]], {}, {});
+assert.deepEqual(orphan.map((node) => node.session.id), ['child']);
+// 连续移交 A→B→C 折叠到根，只缩进一层
+const chain = buildSessionTree(
+  [
+    { agent: 'codex', id: 'a', updated: '2026-08-25T01:00:00Z' },
+    {
+      agent: 'codex', id: 'b', updated: '2026-08-25T02:00:00Z',
+      sage: { kind: 'handoff', source_agent: 'codex', source_session_id: 'a' },
+    },
+    {
+      agent: 'claude', id: 'c', updated: '2026-08-25T03:00:00Z',
+      sage: { kind: 'handoff', source_agent: 'codex', source_session_id: 'b' },
+    },
+  ],
+  {}, {}
+);
+assert.equal(chain.length, 1);
+assert.equal(chain[0].session.id, 'a');
+assert.deepEqual(chain[0].children.map((s) => s.id), ['c', 'b']);
+// 协作搭档不是移交，不做嵌套（它们本来就被 filterSessions 挡在侧栏外）
+assert.equal(
+  buildSessionTree(
+    [
+      { agent: 'claude', id: 'owner', updated: '2026-08-25T01:00:00Z' },
+      {
+        agent: 'codex', id: 'mate', updated: '2026-08-25T02:00:00Z',
+        sage: { kind: 'collaborate', source_agent: 'claude', source_session_id: 'owner' },
+      },
+    ],
+    {}, {}
+  ).length,
+  2
+);
+// 本地关联表里的移交同样成立；数据成环时不死循环、每条会话只出现一次
+const storeTree = buildSessionTree(
+  [
+    { agent: 'claude', id: 'owner', updated: '2026-08-25T01:00:00Z' },
+    { agent: 'codex', id: 'taken-over', updated: '2026-08-25T02:00:00Z' },
+  ],
+  {},
+  {
+    links: { 'claude:owner': [{ partner: 'codex:taken-over', kind: 'handoff' }] },
+    back: { 'codex:taken-over': 'claude:owner' },
+  }
+);
+assert.deepEqual(
+  storeTree.map((node) => [node.session.id, node.children.map((s) => s.id)]),
+  [['owner', ['taken-over']]]
+);
+const cyclic = buildSessionTree(
+  [
+    { agent: 'codex', id: 'x', sage: { kind: 'handoff', source_agent: 'codex', source_session_id: 'y' } },
+    { agent: 'codex', id: 'y', sage: { kind: 'handoff', source_agent: 'codex', source_session_id: 'x' } },
+  ],
+  {}, {}
+);
+assert.equal(cyclic.length + cyclic.reduce((sum, node) => sum + node.children.length, 0), 2);
+// 运行注册表兜底：会话文件还没落盘 sage 元数据时也能配对
+assert.equal(
+  handoffParentKey(
+    { agent: 'codex', id: 'target' },
+    { target: handoffRun },
+    {}
+  ),
+  'claude:origin'
+);
+assert.equal(handoffParentKey({ agent: 'codex', id: 'plain' }, {}, {}), null);
+
+console.log('sage session-tree tests passed');
+
+// ---- 一个会话只路由一次：首轮定执行者，之后沿用 ----
+const SESS = { agent: 'codex', id: 'live-1' };
+const base = { sageOn: true, session: SESS, text: '继续看看这个', hasAttachments: false };
+// 首轮：还没被决策过 → 路由
+assert.equal(shouldRouteFollowUp({ ...base, decided: false, retrying: false }), true);
+// 之后的追问：已定执行者 → 不再重新决策（否则每轮被学习噪声带着换模型）
+assert.equal(shouldRouteFollowUp({ ...base, decided: true, retrying: false }), false);
+// 例外一：上一轮执行失败 → 重路由，好把失败的执行者换掉
+assert.equal(shouldRouteFollowUp({ ...base, decided: true, retrying: true }), true);
+// 开关关掉就完全不路由
+assert.equal(shouldRouteFollowUp({ ...base, sageOn: false, decided: false }), false);
+// 斜杠命令走 CLI 内置命令，不参与路由
+assert.equal(shouldRouteFollowUp({ ...base, text: '/review', decided: false }), false);
+// 带图/附件的消息不路由（关键词推断对附件无能为力）
+assert.equal(shouldRouteFollowUp({ ...base, hasAttachments: true, decided: false }), false);
+// 空文本、无会话（Hero 首轮走另一条分支）
+assert.equal(shouldRouteFollowUp({ ...base, text: '', decided: false }), false);
+assert.equal(shouldRouteFollowUp({ ...base, session: null, decided: false }), false);
+assert.equal(shouldRouteFollowUp({ ...base, session: { agent: 'codex', id: null }, decided: false }), false);
+assert.equal(shouldRouteFollowUp(), false);
+
+console.log('sage route-once tests passed');

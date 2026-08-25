@@ -10,7 +10,8 @@
 - 需求 DAG（planning→coding→review 等依赖）；失败重路由经 ExecutionState.failed_agents。
 
 命令（stdin JSON）：
-  {"cmd":"route","prompt":...,"incumbent":"claude|codex","failed":["codex"]?}
+  {"cmd":"route","prompt":...,"incumbent":"claude|codex","failed":["codex"]?,
+   "unavailable":["codex::gpt-5.2"]?}
   {"cmd":"outcome","decision_blob":{...},"success":0..1,
    "actual_cost":x?,"actual_latency_ms":y?}
 
@@ -44,8 +45,13 @@ TASK_ID = "chat-task"
 
 KEYWORDS = {
     "debugging": ["修复", "报错", "bug", "为什么", "排查", "错误", "fix", "error", "崩溃", "失败", "异常", "不行", "问题"],
-    "coding": ["实现", "开发", "写", "增加", "新增", "功能", "集成", "implement", "add", "build", "创建", "改成", "支持"],
-    "review": ["审查", "review", "检查代码", "代码质量", "安全审查", "audit"],
+    # 「写」曾是单字关键词，"这段代码是怎么写的" 这类纯提问会被判成 100% 写代码任务，
+    # 用复合词代替；单元测试归到 coding，没有独立的 testing 技能维度可打分。
+    "coding": ["实现", "开发", "编写", "写个", "写一个", "写一段", "写一份", "帮我写",
+               "增加", "新增", "功能", "集成", "implement", "add", "build", "创建", "改成", "支持",
+               "单元测试", "测试用例", "补测试"],
+    "review": ["审查", "review", "检查代码", "代码质量", "安全审查", "安全复查", "复查",
+               "核对", "校验", "code review", "audit"],
     "analysis": ["分析", "检查", "查看", "看看", "确认", "对比", "统计", "explain", "解释", "理解", "是不是", "是否"],
     "planning": ["方案", "计划", "设计", "架构", "规划", "plan", "design", "怎么做", "思路"],
     "refactor": ["重构", "优化", "整理", "简化", "refactor", "clean"],
@@ -55,6 +61,13 @@ KEYWORDS = {
 
 # 画像刻意拉开差距（参考上游 README 示例的形态）：两边都是 0.8+ 的全才时
 # 算法永远单干；只有互补且有真实短板，COLLABORATE 才会由效用比较自然胜出。
+#
+# 这个差距一度被怀疑是「每轮追问都换模型」的元凶，实测排除：把双方短板填平
+# （codex docs 0.60→0.80 等）后漂移依旧，而 COLLABORATE 直接失效（team 3→1）。
+# 真正的元凶是 ExecutionState 里写死的 progress=0 / transferable_context=1，
+# 把上游的切换阻尼整个关掉了；那两个值传真实后，漂移在同样的画像下自行消失。
+# 因此这里维持原状——差距负责「够互补才组队」，防漂移由 ExecutionState 负责，
+# 两件事不要混在同一个旋钮上。
 DEFAULT_PROFILES = {
     "claude": {
         "planning": 0.93, "analysis": 0.92, "review": 0.90, "docs": 0.94,
@@ -69,6 +82,13 @@ DEFAULT_PROFILES = {
         "permissions": ["read", "workspace_write"],
     },
 }
+
+# 目录里出现、但没有对应画像分支的型号（新上线，或早已下线的历史遗留）：既不知道它强不强，
+# 也不知道当前 provider 还认不认。给「最贵 + 最慢 + 技能打折」的保守画像，让它在效用比较里
+# 不占任何便宜——否则未知型号会以「满血基线 + 低价」的形态压过真实旗舰被优先选中。
+UNKNOWN_SKILL_FACTOR = 0.88
+UNKNOWN_COST = 0.22
+UNKNOWN_LATENCY = 1900.0
 
 ROLE_NAMES = {
     "planning": "Planner",
@@ -132,6 +152,9 @@ def _model_profile(runtime, model, context_window=None):
             base["permissions"] = ["read"]
         elif "5.5" in low or "5.4" in low:
             cost, latency = 0.13, 1350.0
+        else:
+            cost, latency = UNKNOWN_COST, UNKNOWN_LATENCY
+            skills = {k: round(v * UNKNOWN_SKILL_FACTOR, 4) for k, v in skills.items()}
     else:
         if "opus" in low or "fable" in low:
             cost, latency = 0.20, 1800.0
@@ -146,6 +169,9 @@ def _model_profile(runtime, model, context_window=None):
             cost, latency = 0.035, 500.0
             for key in ("planning", "analysis", "review", "vision"):
                 skills[key] = max(0.40, skills[key] - 0.10)
+        else:
+            cost, latency = UNKNOWN_COST, UNKNOWN_LATENCY
+            skills = {k: round(v * UNKNOWN_SKILL_FACTOR, 4) for k, v in skills.items()}
 
     if context_window and context_window >= 1_000_000:
         skills["analysis"] = min(0.99, skills["analysis"] + 0.02)
@@ -397,17 +423,33 @@ def make_router(incumbent, st, constraints=None, profiles=None, max_collaborator
 # route
 # ---------------------------------------------------------------------------
 
-def infer_requirements(prompt):
+def infer_requirements(prompt, incumbent_skills=None):
+    """返回 (需求权重, 是否真的识别出了任务类型)。
+
+    关键词一个都没命中 = 认不出这是什么任务。旧实现在这里兜底成
+    {coding, analysis}，而 analysis 上 claude 天然占优，导致「这个字段是干嘛的」
+    这类没有技术动词的随口一问也会被移交出去。认不出来时改用在任执行者的强项
+    当需求，让效用比较自然落回 SELF——不知道要干什么，就不该换人。
+    """
     low = prompt.lower()
     hits = {}
     for cat, words in KEYWORDS.items():
         n = sum(low.count(w) for w in words)
         if n > 0:
             hits[cat] = n
+    matched = bool(hits)
     if not hits:
-        hits = {"coding": 1, "analysis": 1}
+        skills = {
+            key: value for key, value in (incumbent_skills or {}).items()
+            if key in KEYWORDS
+        }
+        if skills:
+            top = sorted(skills.items(), key=lambda kv: -kv[1])[:2]
+            hits = {cat: 1 for cat, _ in top}
+        else:
+            hits = {"coding": 1, "analysis": 1}
     total = sum(hits.values())
-    return {cat: max(0.15, n / total) for cat, n in hits.items()}
+    return {cat: max(0.15, n / total) for cat, n in hits.items()}, matched
 
 
 def build_bids(st, profiles):
@@ -486,9 +528,18 @@ def cmd_route(req, st):
                 executor_id for executor_id, profile in profiles.items()
                 if profile["runtime"] == value
             )
-    failed = frozenset(failed)
+    # 运行期确认当前 provider 不提供的执行体（model_not_found 等）：同样硬排除，但它不是
+    # 「这个任务失败了一次」，不能计进 failure_count——否则会连带压低 recovery_discount，
+    # 让一个与任务无关的环境问题扭曲整轮决策。
+    unavailable = set(
+        _expand_executor_refs(set(req.get("unavailable") or []), profiles, incumbent)
+    )
+    task_failures = len(failed)
+    failed = frozenset(failed | unavailable)
 
-    weights = infer_requirements(prompt)
+    weights, requirements_matched = infer_requirements(
+        prompt, (profiles.get(incumbent) or {}).get("skills")
+    )
     ordered = sorted(weights.items(), key=lambda kv: -kv[1])
     present = {cat for cat, _ in ordered}
     requirements = tuple(
@@ -549,7 +600,7 @@ def cmd_route(req, st):
             else max(0.0, min(1.0, float(raw_state["transferable_context"])))
         ),
         failed_agents=failed,
-        failure_count=max(int(raw_state.get("failure_count", 0)), len(failed)),
+        failure_count=max(int(raw_state.get("failure_count", 0)), task_failures),
     )
     router = make_router(
         incumbent,
@@ -623,6 +674,8 @@ def cmd_route(req, st):
     }
     return {
         "mode": mode,
+        # false = 一个关键词都没命中，需求是拿在任执行者的强项凑的，不代表真识别出了任务类型
+        "requirements_matched": requirements_matched,
         "primary": primary,
         "partner": partner,
         "partners": partners,

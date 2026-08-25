@@ -63,6 +63,7 @@ const I18N_EN = {
   '编辑了文件': 'Edited files', '读取了文件': 'Read files', '运行了命令': 'Ran commands',
   '执行了操作': 'Performed actions', '⚡ 快速': '⚡ Fast', '⚡ 快速·开': '⚡ Fast · on',
   '🧭 智能路由': '🧭 Smart routing', '🧭 智能路由·开': '🧭 Routing · on', '🧭 路由中…': '🧭 Routing…',
+  '🧭 已定执行者': '🧭 Executor locked',
   '🧭 SAGE 路由': '🧭 SAGE routing', '继续当前': 'Stay', '移交': 'Handoff', '协作': 'Collaborate',
   '需求推断：': 'Inferred needs: ', '协作：完成后由 ': 'Collaborate: reviewed by ',
   ' 复查，结论回注收尾': ', findings fed back to wrap up',
@@ -638,6 +639,7 @@ const state = {
   agentFilter: localStorage.getItem('ah-agent-filter') || '', // ''=全部 | claude | codex
   sageOn: localStorage.getItem('ah-sage') === '1',            // SAGE 智能路由开关
   sageFailed: null,       // 失败重路由记忆 {task, agents:[]}（成功后清空）
+  sageTaskText: null,     // 当前 SAGE 任务的原始输入，失败记忆据此归属
   pendingSage: null,      // 待持久化的路由决策（init 拿到会话 id 即存）
   memOn: localStorage.getItem('ah-mem') === '1',              // OpenViking 记忆插件开关
   teamOn: localStorage.getItem('ah-team') === '1',            // 团队模式（多子 agent 分工）
@@ -1321,9 +1323,31 @@ async function openProjectPicker(anchor) {
 
 /* ---------- 侧栏：会话列表与搜索 ---------- */
 
-function sessionRow(s) {
+/** 分支头部：收起/展开箭头 + 收起时的子会话计数。
+ *  箭头吃掉点击，否则点开合会顺手打开这条会话。 */
+function addBranchToggle(row, branchKey, count, collapsed) {
+  row.dataset.branchHead = branchKey;
+  const badge = el('span', 'srow-subcount' + (collapsed ? '' : ' hidden'), String(count));
+  row.appendChild(badge);
+  const caret = el('span', 'srow-caret' + (collapsed ? '' : ' open'), '▸');
+  caret.title = tBranch(count);
+  caret.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleBranch(branchKey);
+  });
+  row.appendChild(caret);
+}
+
+function tBranch(count) {
+  return CUR_LANG === 'en'
+    ? `${count} handoff sub-session${count > 1 ? 's' : ''} — click to collapse/expand`
+    : `${count} 个移交子会话 · 点击收起/展开`;
+}
+
+/** nested=true：SAGE 移交子会话，缩进挂在来源会话下 */
+function sessionRow(s, nested) {
   const cfg = AGENTS[s.agent];
-  const row = el('div', 'srow' + (s.archived ? ' archived' : ''));
+  const row = el('div', 'srow' + (nested ? ' srow-sub' : '') + (s.archived ? ' archived' : ''));
   row.dataset.key = s.agent + ':' + s.id;
   if (state.activeKey === row.dataset.key) row.classList.add('active');
   const dot = el('span', 'agent-dot ' + (cfg ? cfg.cls : 'ag-codex'));
@@ -1334,7 +1358,8 @@ function sessionRow(s) {
   const timeEl = el('span', 'srow-time', relTime(s.updated || s.created));
   timeEl.dataset.ts = s.updated || s.created || ''; // 供定时器原地刷新相对时间
   row.appendChild(timeEl);
-  row.title = (s.title || t('(无标题)')) + '\n' + (s.project || '') + (s.archived ? '\n（已归档）' : '');
+  row.title = (s.title || t('(无标题)')) + '\n' + (s.project || '') +
+    (nested ? '\n' + t('（SAGE 移交子会话）') : '') + (s.archived ? '\n（已归档）' : '');
   row.addEventListener('click', () => openSession(s));
   // 右键：删除会话（移入 ~/.agenthub/trash 回收目录，可恢复）
   row.addEventListener('contextmenu', (e) => {
@@ -1485,6 +1510,40 @@ function tShowMore(step, remaining) {
     : '再显示 ' + step + ' 条（剩 ' + remaining + '）';
 }
 
+/** 收起的移交分支（存父会话 key）。默认展开，只记用户手动收起过的。 */
+function collapsedBranches() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem('ah-branch-collapsed') || '[]'));
+  } catch (_) {
+    return new Set();
+  }
+}
+
+function toggleBranch(branchKey) {
+  const set = collapsedBranches();
+  if (set.has(branchKey)) set.delete(branchKey);
+  else set.add(branchKey);
+  localStorage.setItem('ah-branch-collapsed', JSON.stringify([...set]));
+  applyBranchCollapse();
+}
+
+/** 同一分支可能同时出现在「对话」和项目列表里，按 key 一起同步，不重新拉数据 */
+function applyBranchCollapse() {
+  const collapsed = collapsedBranches();
+  document.querySelectorAll('.srow[data-branch]').forEach((row) => {
+    // 正在查看的子会话不跟着藏，否则当前会话在侧栏没了着落
+    const active = state.activeKey === row.dataset.key;
+    row.classList.toggle('hidden', collapsed.has(row.dataset.branch) && !active);
+  });
+  document.querySelectorAll('.srow[data-branch-head]').forEach((row) => {
+    const off = collapsed.has(row.dataset.branchHead);
+    const caret = row.querySelector('.srow-caret');
+    if (caret) caret.classList.toggle('open', !off);
+    const count = row.querySelector('.srow-subcount');
+    if (count) count.classList.toggle('hidden', !off);
+  });
+}
+
 function collapsedGroups() {
   try {
     return new Set(JSON.parse(localStorage.getItem('ah-collapsed') || '[]'));
@@ -1544,7 +1603,8 @@ function setAgentFilter(f) {
   if ($('#search-input').value.trim()) onSearch();
 }
 
-/** 会话列表：默认 6 条，点击阶梯式追加 20 条（新增行瀑布渐入），展开后可收起 */
+/** 会话列表：默认 6 条，点击阶梯式追加 20 条（新增行瀑布渐入），展开后可收起。
+ *  条数按顶层分支计，移交子会话跟随来源会话一起显示，不单独占配额。 */
 function renderSessionList(listEl, sessions, key, animateFrom) {
   sessions = filterSessions(sessions);
   listEl.textContent = '';
@@ -1552,18 +1612,39 @@ function renderSessionList(listEl, sessions, key, animateFrom) {
     listEl.appendChild(el('div', 'empty', t('暂无对话')));
     return;
   }
-  const shown = Math.min(listShown.get(key) || LIST_BASE, sessions.length);
+  // filterSessions 会先把回溯配对的关联写回本地表，这里再读才拿得到最新父子关系
+  const tree = SageScheduler.buildSessionTree(sessions, state.runsIndex, collabStoreLoad());
+  const collapsed = collapsedBranches();
+  const shown = Math.min(listShown.get(key) || LIST_BASE, tree.length);
   for (let i = 0; i < shown; i++) {
-    const row = sessionRow(sessions[i]);
-    if (animateFrom !== undefined && i >= animateFrom) {
-      row.classList.add('row-in');
-      row.style.animationDelay = Math.min((i - animateFrom) * 25, 500) + 'ms';
+    const node = tree[i];
+    const head = sessionRow(node.session);
+    const rows = [head];
+    if (node.children.length) {
+      const branchKey = node.session.agent + ':' + node.session.id;
+      // 正在查看的子会话所在分支强制展开，否则当前会话在侧栏找不到
+      const off =
+        collapsed.has(branchKey) &&
+        !node.children.some((c) => state.activeKey === c.agent + ':' + c.id);
+      addBranchToggle(head, branchKey, node.children.length, off);
+      for (const child of node.children) {
+        const row = sessionRow(child, true);
+        row.dataset.branch = branchKey;
+        if (off) row.classList.add('hidden');
+        rows.push(row);
+      }
     }
-    listEl.appendChild(row);
+    for (const row of rows) {
+      if (animateFrom !== undefined && i >= animateFrom) {
+        row.classList.add('row-in');
+        row.style.animationDelay = Math.min((i - animateFrom) * 25, 500) + 'ms';
+      }
+      listEl.appendChild(row);
+    }
   }
   const foot = el('div', 'list-foot');
-  if (shown < sessions.length) {
-    const remaining = sessions.length - shown;
+  if (shown < tree.length) {
+    const remaining = tree.length - shown;
     const more = el('button', 'link-btn more-btn', tShowMore(Math.min(LIST_STEP, remaining), remaining));
     more.type = 'button';
     more.addEventListener('click', () => {
@@ -1662,6 +1743,7 @@ function setActiveRow(key) {
   document.querySelectorAll('.srow').forEach((r) => {
     r.classList.toggle('active', !!key && r.dataset.key === key);
   });
+  applyBranchCollapse(); // 从正文分隔条跳进子会话时，把收起的那条分支放出来
   const act = document.querySelector('.srow.active');
   if (act) act.scrollIntoView({ block: 'nearest' });
 }
@@ -1806,11 +1888,21 @@ function syncAgentUI() {
     (collabStoreLoad().links[state.session.agent + ':' + state.session.id] || []).length
   );
   sageBtn.classList.toggle('hidden', !canSwitchAgent() && !hasCollab);
-  sageBtn.title = canSwitchAgent()
-    ? 'SAGE 智能路由：按任务复杂度自动选择团队人数、CLI、模型、思考强度与需求分工；与团队模式互斥'
-    : 'SAGE 追问分诊：属搭档擅长域的追问自动转子会话执行并回注';
+  // 已经路由过的会话不再重新决策，按钮上标出来，免得以为智能路由失灵了
+  const sageLocked = !!(
+    state.sageOn && state.session && state.session.id &&
+    sageStoreLoad()[state.session.agent + ':' + state.session.id]
+  );
+  sageBtn.title = sageLocked
+    ? '本会话的执行者已在首轮定下（' + (modelLabel() || currentAgent()) + '），追问一律沿用。\n' +
+      '每轮重新路由会被少量学习样本带偏，导致频繁换模型、上下文反复重建。\n' +
+      '需要换执行者：手动切换，或新建会话重新路由；执行失败时会自动重路由。'
+    : canSwitchAgent()
+      ? 'SAGE 智能路由：按任务复杂度自动选择团队人数、CLI、模型、思考强度与需求分工；与团队模式互斥'
+      : 'SAGE 追问分诊：属搭档擅长域的追问自动转子会话执行并回注';
   sageBtn.classList.toggle('on', state.sageOn);
-  setToggleChip(sageBtn, t('🧭 智能路由'), state.sageOn);
+  sageBtn.classList.toggle('locked-decision', sageLocked);
+  setToggleChip(sageBtn, t(sageLocked ? '🧭 已定执行者' : '🧭 智能路由'), state.sageOn);
   // 快速开关（两家都是真实机制，与思考等级相互独立）：
   // claude = --settings fastMode；codex = -c service_tier（TUI /fast 同款配置键）
   // OpenViking 记忆：claude / codex 均支持（插件 hooks 按次经环境变量开关）
@@ -1893,6 +1985,7 @@ function getModels() {
 function showHero() {
   state.session = null;
   state.histUsage = null;
+  syncBackPrimaryUI(null); // 从子会话新建时清掉来源关系，否则新会话会被当成子会话禁止移交
   $('#view-chat').classList.add('hidden');
   $('#view-hero').classList.remove('hidden');
   $('#hero-slot').appendChild(composerEl);
@@ -2924,6 +3017,14 @@ async function openSession(s) {
     const qs = new URLSearchParams({ agent: s.agent, id: s.id, project: s.project || '' });
     const t = await api.get('/api/session?' + qs);
     if (!state.session || state.session.id !== s.id || state.session.agent !== s.agent) return; // 已切走
+    // 会话自己录到的模型优先于界面当前选择：resume 会带模型下发，
+    // 不回填就等于用侧栏上次选的模型顶掉这条会话原本在跑的模型。
+    const recordedModel = t.model || (t.usage && t.usage.model);
+    if (recordedModel && !sessionModel) {
+      state.session.model = recordedModel;
+      state.model = recordedModel;
+      syncAgentUI();
+    }
     chatMsgs.textContent = '';
     renderTranscript(chatMsgs, t);
     // 该会话若有路由决策记录 → 在首条回答前重现决策卡（默认折叠）
@@ -3452,6 +3553,7 @@ function handleEvent(ev) {
         prependConvRow();
       }
       stream.doneOk = !!ev.ok;
+      stream.doneError = ev.error || ''; // 供 SAGE 判定是模型级不可用还是普通失败
       finalizeCur();
       flushFilesCard(stream.ctx); // 汇总本轮编辑的文件卡片
       if (!ev.ok) {
@@ -3897,6 +3999,38 @@ function transcriptFinalText(tr) {
   return '';
 }
 
+/** 移交结论卡：把接管方的最终回答摊在来源会话里（默认收起，点开看全文）。
+ *  只做展示，不喂给主 agent——移交的语义就是它已经不管这件事了。 */
+function handoffResultCard(tr, partnerId, link) {
+  const run = state.runsIndex[partnerId];
+  const en = CUR_LANG === 'en';
+  const card = el('div', 'card handoff-result');
+  const head = el('div', 'card-head');
+  head.appendChild(el('span', 'card-caret', '▸'));
+  if (run && run.running) {
+    // 还在跑就别贴半截结论，给个状态占位，刷新/重开时自然会变成结论
+    head.appendChild(
+      el('span', 'card-title', (en ? '🧭 Taken over · running · ' : '🧭 已接管 · 运行中 · ') + link.label)
+    );
+    card.appendChild(head);
+    card.classList.add('empty-note');
+    return card;
+  }
+  const text = transcriptFinalText(tr);
+  if (!text) return null;
+  head.appendChild(
+    el('span', 'card-title', (en ? '🧭 Handoff result · ' : '🧭 接管结论 · ') + link.label)
+  );
+  const body = el('div', 'card-body');
+  const md = el('div', 'md');
+  renderMarkdown(md, text);
+  body.appendChild(md);
+  card.appendChild(head);
+  card.appendChild(body);
+  head.addEventListener('click', () => card.classList.toggle('open'));
+  return card;
+}
+
 /** 本页观察到过「运行中」的子会话 id：其转为完成时触发自动回注 */
 const seenRunningPartners = new Set();
 
@@ -3982,6 +4116,15 @@ async function stitchCollab(s, tr) {
         });
       });
       sec.appendChild(secDiv);
+      // 移交仍然不回注（所有权已经交出去了，再让主 agent 跑一轮是白烧一轮 token），
+      // 但结论要能在这里直接看到——否则主会话只剩一条空分隔线，任务像是凭空消失了。
+      if (ln.kind === 'handoff') {
+        const card = handoffResultCard(tr, pId, ln);
+        if (card) sec.appendChild(card);
+        chatMsgs.appendChild(sec);
+        scrollChat();
+        continue;
+      }
       // 插到对应的回注卡之前（时间序一一对应；找不到则追加到末尾）
       const anchors = [...chatMsgs.querySelectorAll('.collab-inject')].filter((c) =>
         /分工产出回注|复查意见回注|Consolidated partner output|Review feedback/.test(c.textContent || '')
@@ -3991,10 +4134,6 @@ async function stitchCollab(s, tr) {
         chatMsgs.insertBefore(sec, anchor);
       } else {
         chatMsgs.appendChild(sec);
-        if (ln.kind === 'handoff') {
-          scrollChat();
-          continue;
-        }
         // 官方 SAGE DAG（带 workflow_id）的收尾由所有者的 __summary__ 节点完成，
         // 再走一遍旧版回注等于让主 agent 白跑一轮，只保留子会话入口。
         if (ln.workflow_id) {
@@ -4077,6 +4216,86 @@ function sageStoreSave(key, d) {
   localStorage.setItem('ah-sage-decisions', JSON.stringify(all));
 }
 
+/** 运行期确认「当前 provider 不提供这个模型」的记忆：executorId → 记录时间戳。
+ *  服务端已按网关 /models 过滤过一遍，这里兜住真正跑起来才暴露的型号（网关探测降级、
+ *  或网关列了但实际不可用）。到期自动放行，模型重新上线不需要手工清。 */
+const MODEL_BLOCK_KEY = 'ah-model-blocked';
+const MODEL_BLOCK_TTL = 24 * 3600 * 1000;
+
+function modelBlockLoad() {
+  let all = {};
+  try {
+    all = JSON.parse(localStorage.getItem(MODEL_BLOCK_KEY)) || {};
+  } catch (_) {
+    all = {};
+  }
+  const now = Date.now();
+  let expired = false;
+  for (const [id, ts] of Object.entries(all)) {
+    if (!(now - ts < MODEL_BLOCK_TTL)) {
+      delete all[id];
+      expired = true;
+    }
+  }
+  if (expired) localStorage.setItem(MODEL_BLOCK_KEY, JSON.stringify(all));
+  return all;
+}
+
+function modelBlockList() {
+  return Object.keys(modelBlockLoad());
+}
+
+/** 新入黑名单返回 true（已在名单内返回 false，避免重复提示）。 */
+function modelBlockAdd(executorId) {
+  const all = modelBlockLoad();
+  if (all[executorId]) return false;
+  all[executorId] = Date.now();
+  localStorage.setItem(MODEL_BLOCK_KEY, JSON.stringify(all));
+  return true;
+}
+
+/** provider 层面的「这个模型用不了」：换思考等级或重试都救不回来，只能换执行者。 */
+function isModelUnavailableError(text) {
+  const s = String(text || '').toLowerCase();
+  return (
+    s.includes('model_not_found') ||
+    s.includes('unknown provider for model') ||
+    s.includes('unsupported model') ||
+    s.includes('does not have access to model') ||
+    (s.includes('model') && s.includes('does not exist'))
+  );
+}
+
+/** 失败后的路由记忆：executor 进本任务 failed_agents；模型级不可用再进全局黑名单。 */
+function sageRememberFailure(executorId, errorText) {
+  const task = state.sageTaskText;
+  if (!executorId || !task) return;
+  const f =
+    state.sageFailed && state.sageFailed.task === task ? state.sageFailed : { task, agents: [] };
+  if (!f.agents.includes(executorId)) f.agents.push(executorId);
+  state.sageFailed = f;
+  if (isModelUnavailableError(errorText) && modelBlockAdd(executorId)) {
+    showToast(
+      CUR_LANG === 'en'
+        ? `⚠ The provider does not serve ${executorId} — excluded from routing`
+        : `⚠ 当前 provider 不提供 ${executorId}，已从路由候选中排除`
+    );
+  }
+}
+
+/** 会话已经积累了多少「换人就得重来」的工作。
+ *  上游 ALGORITHM.md：switching loss 取决于 progress 与 transferable context，
+ *  「harder after valuable non-transferable work has accumulated」。
+ *  这里此前硬编码 progress=0，等于永远宣称毫无积累，把上游的防抖整个关掉了。
+ *  用上下文占用比当代理指标：聊得越久、上下文越满，换人越亏。 */
+function sageSessionProgress(session) {
+  if (!session || !session.id) return 0; // 新会话，确实没有积累
+  const u = state.histUsage;
+  const ratio = u && u.context > 0 && u.window > 0 ? u.context / u.window : 0;
+  // 已经在这条会话里干过活就不该按 0 算，给一个下限
+  return Math.max(0.25, Math.min(0.9, ratio));
+}
+
 /** 官方 Task/ExecutionState 输入：未配置真实 SLA 时不伪造 budget/deadline。 */
 function sageRouteContext(session, failed) {
   const previous =
@@ -4091,17 +4310,22 @@ function sageRouteContext(session, failed) {
           active_agents: previous.agents || [session.agent],
           active_mode: previous.mode || 'self',
           completed_requirements: [], // 追问是新 Task，不沿用上一 Task 的完成节点
-          progress: 0,
-          transferable_context: 1,
+          progress: sageSessionProgress(session),
+          // null = 用上游默认 0.70。此前写死 1（「上下文完全可无损转移」）纯属误读：
+          // 跨 CLI 移交要把来源记录重灌一遍，本来就是有损的。
+          transferable_context: null,
           failed_agents: failed || [],
           failure_count: (failed || []).length,
         }
       : {
-          active_agents: [],
+          // 没有路由记录 ≠ 没有在任执行者：这条会话正跑着的就是 session.agent。
+          // 传空数组会命中上游 _switch_loss 的「无 active route」分支，移交成本直接归零，
+          // 于是任何一条没被 SAGE 决策过的会话（终端建的、刚打开智能路由的）追问必漂移。
+          active_agents: session && session.id ? [session.agent] : [],
           active_mode: 'self',
           completed_requirements: [],
-          progress: 0,
-          transferable_context: 1,
+          progress: sageSessionProgress(session),
+          transferable_context: null,
           failed_agents: failed || [],
           failure_count: (failed || []).length,
         },
@@ -4119,6 +4343,8 @@ function sageRoutePayload(prompt, agent, failed, session) {
     prompt,
     agent,
     failed: context.failed,
+    // 不可用模型走独立字段：同样硬排除，但不该被算成「这个任务失败过几次」
+    unavailable: modelBlockList(),
     state: context.state,
     constraints: context.constraints,
   };
@@ -4157,12 +4383,17 @@ function applySagePrimary(decision) {
 function sageCard(d) {
   const MODE_CN = { self: '继续当前', handoff: '移交', collaborate: '协作' };
   // 移交/协作时默认展开，让「去了哪、为什么」一眼可见
-  const card = el('div', 'card sage' + (d.mode === 'self' ? '' : ' open'));
+  const card = el('div', 'card sage' + (d.mode === 'self' || d.pinned ? '' : ' open'));
   const head = el('div', 'card-head');
   head.appendChild(el('span', 'card-caret', '▸'));
   const who = sageExecutorLabel(d, d.primary);
+  const modeText = d.pinned
+    ? (CUR_LANG === 'en' ? 'stay put' : '留在本会话')
+    : d.in_place
+      ? (CUR_LANG === 'en' ? 'take over in place' : '原地接管')
+      : t(MODE_CN[d.mode] || d.mode);
   head.appendChild(
-    el('span', 'card-title', t('🧭 SAGE 路由') + ' · ' + t(MODE_CN[d.mode] || d.mode) + ' → ' + who)
+    el('span', 'card-title', t('🧭 SAGE 路由') + ' · ' + modeText + ' → ' + who)
   );
   const body = el('div', 'card-body');
   const en = CUR_LANG === 'en';
@@ -4176,11 +4407,26 @@ function sageCard(d) {
   if (reqEntries.length) {
     lines.push(
       (en ? 'Task makeup: ' : '任务构成：') +
-        reqEntries.map(([k, v]) => reqName(k) + ' ' + Math.round(v * 100) + '%').join('、')
+        reqEntries.map(([k, v]) => reqName(k) + ' ' + Math.round(v * 100) + '%').join('、') +
+        (d.requirements_matched === false
+          ? (en ? ' (no keyword matched — inferred from the incumbent\'s strengths)' : '（未命中任何关键词，按在任执行者的强项推定）')
+          : '')
     );
   }
   // 判定结论（自然语言）
-  if (d.mode === 'handoff') {
+  if (d.mode === 'handoff' && d.pinned) {
+    lines.push(
+      en
+        ? `Verdict: routing favours ${who}, but this session is already a handoff target — chaining further would push the result one more level away from its origin, with no end in sight. Staying put.`
+        : `判定：路由倾向 ${who}，但本会话已经是移交的接管方——再往下移交只会让结论离来源又远一层，且没有终点。就留在这里继续。`
+    );
+  } else if (d.mode === 'handoff' && d.in_place) {
+    lines.push(
+      en
+        ? `Verdict: ${who} is the specialist for this. Same CLI, so it takes over in place with a model switch — no new session, context stays put.`
+        : `判定：这类任务 ${who} 更擅长；同一 CLI，直接在本会话换模型接管，不另开会话、上下文原地保留。`
+    );
+  } else if (d.mode === 'handoff') {
     lines.push(
       en
         ? `Verdict: ${who} is the specialist for this — its advantage exceeds the modeled context-transfer and switching loss.`
@@ -4825,6 +5071,12 @@ async function runSageCollaboration(decision, originalTask) {
         agentScores[agent] = owned.reduce((sum, name) => sum + (results[name].ok ? 1 : 0), 0) / owned.length;
       }
     }
+    // 逐节点记失败：模型级不可用的执行体要立刻退出后续路由候选
+    for (const name of requirementNames) {
+      const node = results[name];
+      if (node && node.executed && !node.ok) sageRememberFailure(assignments[name], node.error);
+    }
+    if (!summary.ok) sageRememberFailure(owner, summary.error);
     await api.post('/api/sage/outcome', {
       decision_blob: decision.decision_blob,
       success: totalWeight > 0 ? weighted / totalWeight : summary.ok ? 1 : 0,
@@ -4856,7 +5108,8 @@ function existingHandoffLink(previous, decision, executor) {
   return SageScheduler.reusableHandoffLink(links, executor.runtime);
 }
 
-/** 官方 HANDOFF：peer 接管所有权。首次移交新建会话，后续追问接回同一条分支。 */
+/** 官方 HANDOFF：peer 接管所有权。首次移交新建会话，后续追问接回同一条分支。
+ *  只处理跨 runtime 的移交——同 runtime 已在 sendPrompt 降级为原地接管（不另开会话）。 */
 async function runSageHandoff(decision, originalTask) {
   const previous = state.session;
   const executor = applySagePrimary(decision);
@@ -4945,6 +5198,8 @@ async function runSageHandoff(decision, originalTask) {
       },
     });
     if (controller.signal.aborted) return;
+    if (result.ok) state.sageFailed = null;
+    else sageRememberFailure(decision.primary, result.error);
     const requirementScores = Object.fromEntries(
       Object.keys(decision.assignments || {}).map((name) => [name, result.ok ? 1 : 0])
     );
@@ -5042,6 +5297,7 @@ async function onSend() {
   if (state.sageOn && !state.session && routingPrompt.trim() && !text.startsWith('/')) {
     const btn = $('#sage-btn');
     setToggleChip(btn, t('🧭 路由中…'), true);
+    state.sageTaskText = text;
     try {
       // 失败重路由：同一任务重发时，把上次失败的执行者交给 ExecutionState.failed_agents
       const failed =
@@ -5076,24 +5332,67 @@ async function onSend() {
     syncAgentUI();
   }
 
-  // 进行中会话的追问也按官方 live state 重新比较 SELF / COLLABORATE / HANDOFF。
+  // 一个会话只路由一次：首轮定下执行者，之后的追问一律沿用，不再重新比较。
+  //
+  // 上游 SAGE 是「给定一个 Task 选最优配置」的路由器，一个任务路由一次；把每轮追问
+  // 都当成新 Task 反复决策，会被 ~/.agenthub/sage_state.json 里的小样本学习噪声左右
+  // ——实测同一批提问，空学习状态下 5/5 留任，带上仅 8 次更新的真实状态后 0/5 留任，
+  // 每轮换一个模型，新执行者还得重新理解一遍上下文。
+  //
+  // 两个例外仍然要重新路由：
+  //   1. 上一轮执行失败（官方的失败重路由语义，failed_agents 会带上失败的执行者）
+  //   2. 这条会话还没被 SAGE 决策过（终端建的、刚打开智能路由的——那就是它的首轮）
+  const sageRetry = !!(state.sageFailed && (state.sageFailed.agents || []).length);
   if (
-    state.sageOn &&
-    state.session &&
-    state.session.id &&
-    text &&
-    !text.startsWith('/') &&
-    !atts.length
+    SageScheduler.shouldRouteFollowUp({
+      sageOn: state.sageOn,
+      session: state.session,
+      text,
+      hasAttachments: !!atts.length,
+      decided: !!(
+        state.session && state.session.id &&
+        sageStoreLoad()[state.session.agent + ':' + state.session.id]
+      ),
+      retrying: sageRetry,
+    })
   ) {
+    state.sageTaskText = text;
     try {
+      // 失败重试时务必带上失败的执行者，否则重路由可能又挑中刚栽过的那个
       sageInfo = await api.post(
         '/api/sage',
-        sageRoutePayload(routingPrompt, state.session.agent, [], state.session)
+        sageRoutePayload(
+          routingPrompt,
+          state.session.agent,
+          sageRetry ? state.sageFailed.agents : [],
+          state.session
+        )
       );
       if (sageInfo) {
+        // 同一 CLI 的移交降级为原地接管：换模型继续当前会话，不再另开一条
+        sageInfo.in_place = SageScheduler.handoffStaysInPlace(
+          sageInfo,
+          state.session,
+          sageExecutor(sageInfo, sageInfo.primary).runtime
+        );
+        // 子会话不再往下移交：移交链每多一级，结论就离来源会话更远一层，
+        // 而且没有终点（codex→claude→codex→…）。跨 CLI 时整个决策作废，原样继续。
+        if (sageInfo.mode === 'handoff' && !sageInfo.in_place && state.backPrimary) {
+          sageInfo.pinned = true;
+        }
         const who = sageExecutorLabel(sageInfo, sageInfo.primary);
-        const mode = { self: '继续当前', collaborate: '协作', handoff: '移交' }[sageInfo.mode] || sageInfo.mode;
-        showToast(`🧭 ${mode} → ${who}`);
+        if (sageInfo.pinned) {
+          showToast(
+            CUR_LANG === 'en'
+              ? `🧭 Sub-session stays put — ${AGENTS[state.session.agent].label} continues`
+              : `🧭 子会话不再移交 · 仍由 ${AGENTS[state.session.agent].label} 继续`
+          );
+        } else {
+          const mode = sageInfo.in_place
+            ? '原地接管'
+            : { self: '继续当前', collaborate: '协作', handoff: '移交' }[sageInfo.mode] || sageInfo.mode;
+          showToast(`🧭 ${mode} → ${who}`);
+        }
       }
     } catch (_) {
       sageInfo = null; // 重规划失败回退当前会话，不阻塞追问
@@ -5154,9 +5453,19 @@ async function onSend() {
     await runSageCollaboration(sageInfo, finalPrompt);
     return;
   }
-  if (sageInfo && sageInfo.mode === 'handoff') {
+  if (sageInfo && sageInfo.mode === 'handoff' && !sageInfo.in_place && !sageInfo.pinned) {
     await runSageHandoff(sageInfo, finalPrompt);
     return;
+  }
+  // 原地接管：只把执行者的模型/思考档位换上，继续跑当前会话。
+  // 会话上也要记一份：下一轮路由的「在任模型」取自 session.model，
+  // 不更新的话 SAGE 会一直以为还在跑旧模型，来回判定移交。
+  if (sageInfo && sageInfo.in_place) {
+    const executor = applySagePrimary(sageInfo);
+    if (executor.model) state.session.model = executor.model;
+    const inPlaceEffort = sageInfo.primary_effort || executor.effort;
+    if (inPlaceEffort) state.session.effort = inPlaceEffort;
+    syncAgentUI(); // 思考档位按钮读的是 session.effort，得在写完之后再刷一次
   }
 
   beginAssistant();
@@ -5168,7 +5477,11 @@ async function onSend() {
     session_id: state.session.id,
     model: state.model,
     permission: state.permission,
-    effort: sageInfo && sageInfo.primary_effort ? sageInfo.primary_effort : state.effort,
+    // pinned：这次决策整个作废（执行者是当前会话自己），别把别家 CLI 的档位带过来
+    effort:
+      sageInfo && !sageInfo.pinned && sageInfo.primary_effort
+        ? sageInfo.primary_effort
+        : state.effort,
     fast: fastForAgent(state.session.agent),
     memory: state.memOn,
   };
@@ -5181,6 +5494,7 @@ async function onSend() {
   let primaryOk = false;
   let primaryAborted = false;
   let primaryMs = null;
+  let primaryError = '';
   try {
     await streamChat(req, handleEvent, ac.signal);
   } catch (err) {
@@ -5198,6 +5512,7 @@ async function onSend() {
     if (stream) {
       primaryFinal = stream.finalText || '';
       primaryOk = !!stream.doneOk;
+      primaryError = stream.doneError || '';
       primaryMs = Date.now() - stream.startedAt;
     }
     finalizeStream();
@@ -5220,17 +5535,12 @@ async function onSend() {
     state.pendingSage = null;
   }
   // SELF / HANDOFF 结果回喂；COLLABORATE 已由官方 DAG 执行器统一回喂。
-  if (sageInfo && sageInfo.decision_blob && !primaryAborted) {
+  // pinned 的决策没被执行，回喂等于把功劳/锅算到一个没上场的执行者头上。
+  if (sageInfo && sageInfo.decision_blob && !primaryAborted && !sageInfo.pinned) {
     if (primaryOk) {
       state.sageFailed = null;
     } else {
-      const f =
-        state.sageFailed && state.sageFailed.task === text
-          ? state.sageFailed
-          : { task: text, agents: [] };
-      const failedExecutor = sageInfo.primary || req.agent;
-      if (!f.agents.includes(failedExecutor)) f.agents.push(failedExecutor);
-      state.sageFailed = f;
+      sageRememberFailure(sageInfo.primary || req.agent, primaryError);
     }
     const requirementScores = Object.fromEntries(
       Object.keys(sageInfo.assignments || {}).map((name) => [name, primaryOk ? 1 : 0])

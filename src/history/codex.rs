@@ -574,6 +574,7 @@ pub fn transcript(session_id: &str) -> Result<Transcript, String> {
     let (mut u_ctx, mut u_win) = (0i64, 0i64);
     let mut first_ts: Option<String> = None;
     let mut last_ts: Option<String> = None;
+    let mut last_model: Option<String> = None;
     let mut fork_ref: Option<(String, Option<u64>, Option<u64>)> = None;
     let mut spawn_calls: Vec<String> = Vec::new();
     let mut spawned: HashMap<String, String> = HashMap::new();
@@ -598,6 +599,9 @@ pub fn transcript(session_id: &str) -> Result<Transcript, String> {
                     sage.push(meta);
                 }
             }
+        }
+        if let Some(m) = record_model(v.get("type").and_then(Value::as_str), payload) {
+            last_model = Some(m);
         }
         // 用量：token_count 事件（新式 info.total_token_usage / 旧式扁平字段）
         if v.get("type").and_then(Value::as_str) == Some("event_msg")
@@ -719,6 +723,7 @@ pub fn transcript(session_id: &str) -> Result<Transcript, String> {
             "context": if u_ctx > 0 { u_ctx } else { input + cr },
             "window": if u_win > 0 { Some(u_win) } else { None },
             "first_ts": first_ts, "last_ts": last_ts,
+            "model": last_model.clone(),
         })
     });
     attach_subagents(&mut messages, &spawn_calls, &spawned);
@@ -730,7 +735,27 @@ pub fn transcript(session_id: &str) -> Result<Transcript, String> {
         messages,
         sage,
         usage,
+        model: last_model,
     })
+}
+
+/// 该行是否宣告了当前生效的模型。取最后一条即会话真正在跑的模型：
+/// resume 会带 -m 下发，前端不按它回填就等于用界面上次选的模型顶掉这条会话。
+/// （claude 侧同样把它放在 usage.model。）
+fn record_model(record_type: Option<&str>, payload: &Value) -> Option<String> {
+    let raw = match record_type {
+        Some("turn_context") => payload.get("model"),
+        Some("event_msg")
+            if payload.get("type").and_then(Value::as_str) == Some("thread_settings_applied") =>
+        {
+            payload.pointer("/thread_settings/model")
+        }
+        _ => None,
+    };
+    raw.and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(String::from)
 }
 
 fn record_user_prompt(record_type: Option<&str>, payload: &Value) -> Option<String> {
@@ -1395,5 +1420,34 @@ mod tests {
         let mut injected_messages = Vec::new();
         handle_response_item(&mut injected_messages, &continuation, None);
         assert!(injected_messages.is_empty());
+    }
+
+    /// 会话模型要能从 rollout 还原：codex resume 带 -m，取不到就会用界面
+    /// 当前选择顶掉老会话原本在跑的模型。
+    #[test]
+    fn session_model_is_recovered_from_rollout() {
+        assert_eq!(
+            record_model(Some("turn_context"), &json!({"model": "gpt-5.6-sol"})).as_deref(),
+            Some("gpt-5.6-sol")
+        );
+        assert_eq!(
+            record_model(
+                Some("event_msg"),
+                &json!({
+                    "type": "thread_settings_applied",
+                    "thread_settings": {"model": "gpt-5.2", "service_tier": "priority"}
+                })
+            )
+            .as_deref(),
+            Some("gpt-5.2")
+        );
+        // 无关行不参与，空串不算数（否则会把最后生效的模型抹掉）
+        assert_eq!(record_model(Some("session_meta"), &json!({"model": "x"})), None);
+        assert_eq!(
+            record_model(Some("event_msg"), &json!({"type": "token_count"})),
+            None
+        );
+        assert_eq!(record_model(Some("turn_context"), &json!({"model": "  "})), None);
+        assert_eq!(record_model(Some("turn_context"), &json!({})), None);
     }
 }

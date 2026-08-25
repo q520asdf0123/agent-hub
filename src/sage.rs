@@ -42,6 +42,7 @@ pub async fn route(
     prompt: &str,
     incumbent: &str,
     failed: &[String],
+    unavailable: &[String],
     state: Value,
     constraints: Value,
 ) -> Result<Value, String> {
@@ -50,6 +51,7 @@ pub async fn route(
         "prompt": prompt,
         "incumbent": incumbent,
         "failed": failed,
+        "unavailable": unavailable,
         "state": state,
         "constraints": constraints,
     }))

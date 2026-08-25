@@ -182,7 +182,8 @@ var SageScheduler = (function () {
 
   /** 只有 COLLABORATE 的搭档算「子会话」（藏进主会话右侧面板）。
    *  HANDOFF 是所有权移交，目标会话就是接下来的主会话，必须留在侧栏；
-   *  否则智能路由每移交一次，侧栏就少一条记录。 */
+   *  否则智能路由每移交一次，侧栏就少一条记录。
+   *  （留在侧栏但不平铺：buildSessionTree 会把它缩进挂到来源会话下。） */
   function isNestedSageSession(session, runsIndex, store) {
     if (!session || !session.id || !session.agent) return false;
     const key = `${session.agent}:${session.id}`;
@@ -197,6 +198,116 @@ var SageScheduler = (function () {
       const link = collabLinkFromRun(run);
       return link && link.partnerKey === key && link.entry.kind !== 'handoff';
     });
+  }
+
+  /** 同一 CLI runtime 的移交在原会话里换模型接管即可，不必另开会话：
+   *  上下文本来就在这条会话里，另开只会把侧栏拆成两条、还要重灌一遍历史。
+   *  跨 runtime（codex ↔ claude）仍必须新建，两家的会话文件互不通用。 */
+  function handoffStaysInPlace(decision, session, executorRuntime) {
+    return !!(
+      decision && decision.mode === 'handoff' &&
+      session && session.id && session.agent &&
+      executorRuntime && executorRuntime === session.agent
+    );
+  }
+
+  /** 追问要不要重新路由。一个会话只路由一次：首轮定执行者，之后一律沿用。
+   *
+   *  上游 SAGE 是「给定一个 Task 选最优配置」的路由器，一个任务路由一次。把每轮追问
+   *  都当新 Task 反复决策，会被本机学习状态里的小样本噪声左右——实测同一批提问，
+   *  空学习状态 5/5 留任，带上仅 8 次更新的真实状态后 0/5，每轮换个模型，
+   *  接手的模型还得重新理解一遍上下文。
+   *
+   *  两个例外仍要重新路由：上一轮执行失败（官方失败重路由语义），
+   *  以及这条会话还没被决策过（终端建的、刚打开开关的——那就是它的首轮）。 */
+  function shouldRouteFollowUp(options) {
+    const o = options || {};
+    if (!o.sageOn || !o.session || !o.session.id) return false;
+    if (!o.text || String(o.text).startsWith('/')) return false;
+    if (o.hasAttachments) return false;
+    return !o.decided || !!o.retrying;
+  }
+
+  function sessionKey(session) {
+    return session && session.agent && session.id ? `${session.agent}:${session.id}` : '';
+  }
+
+  function sessionTime(session) {
+    return Date.parse((session && (session.updated || session.created)) || '') || 0;
+  }
+
+  /** 会话的移交来源（父会话）key，三处依次兜底：
+   *  会话自带的 sage 元数据 → 本地关联表（含回溯补配的旧记录）→ 运行注册表。 */
+  function handoffParentKey(session, runsIndex, store) {
+    const key = sessionKey(session);
+    if (!key) return null;
+    const meta = session.sage;
+    if (meta && meta.kind === 'handoff' && meta.source_agent && meta.source_session_id) {
+      const parent = `${meta.source_agent}:${meta.source_session_id}`;
+      if (parent !== key) return parent;
+    }
+    const primaryKey = store && store.back && store.back[key];
+    if (primaryKey && primaryKey !== key) {
+      const entry = ((store.links || {})[primaryKey] || []).find(
+        (item) => item && item.partner === key
+      );
+      if (entry && entry.kind === 'handoff') return primaryKey;
+    }
+    for (const run of Object.values(runsIndex || {})) {
+      const link = collabLinkFromRun(run);
+      if (link && link.partnerKey === key && link.entry.kind === 'handoff') return link.primaryKey;
+    }
+    return null;
+  }
+
+  /** 侧栏分组：移交子会话缩进挂到来源会话下，不再各占一行。
+   *  连续移交 A→B→C 一律折叠到根 A（侧栏太窄，多级缩进读不清）；
+   *  来源会话不在本次列表里（被 limit 截断、跨项目）的子会话回退成顶层条目。
+   *  顶层按「自身与子会话中最新的时间」排序，父会话不会因为自己没更新而沉底。 */
+  function buildSessionTree(sessions, runsIndex, store) {
+    const list = (sessions || []).filter((session) => sessionKey(session));
+    const known = new Set(list.map(sessionKey));
+    const parents = new Map();
+    for (const session of list) {
+      const parent = handoffParentKey(session, runsIndex, store);
+      if (parent && known.has(parent)) parents.set(sessionKey(session), parent);
+    }
+    const cache = new Map();
+    const rootOf = (key) => {
+      if (cache.has(key)) return cache.get(key);
+      const chain = [key];
+      const seen = new Set(chain);
+      let cursor = key;
+      while (parents.has(cursor)) {
+        const next = parents.get(cursor);
+        if (seen.has(next)) break; // 数据成环：就近截断，保证每条会话只出现一次
+        seen.add(next);
+        chain.push(next);
+        cursor = next;
+      }
+      for (const item of chain) cache.set(item, cursor);
+      return cursor;
+    };
+    const nodes = new Map();
+    const order = [];
+    for (const session of list) {
+      const key = sessionKey(session);
+      if (rootOf(key) !== key) continue;
+      nodes.set(key, { session, children: [] });
+      order.push(key);
+    }
+    for (const session of list) {
+      const key = sessionKey(session);
+      const root = rootOf(key);
+      if (root !== key) nodes.get(root).children.push(session);
+    }
+    const tree = order.map((key) => nodes.get(key));
+    for (const node of tree) {
+      node.children.sort((left, right) => sessionTime(right) - sessionTime(left));
+    }
+    const branchTime = (node) =>
+      Math.max(sessionTime(node.session), ...node.children.map(sessionTime), 0);
+    return tree.sort((left, right) => branchTime(right) - branchTime(left));
   }
 
   function isLegacyHandoffSource(source, target, sessions) {
@@ -301,6 +412,10 @@ var SageScheduler = (function () {
     selectStopRunIds,
     collabLinkFromRun,
     isNestedSageSession,
+    handoffStaysInPlace,
+    shouldRouteFollowUp,
+    handoffParentKey,
+    buildSessionTree,
     isLegacyHandoffSource,
     collabLinksFromSessions,
     reusableHandoffLink,
